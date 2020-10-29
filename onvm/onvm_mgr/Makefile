@@ -37,6 +37,8 @@
 
 # set this to 0 to disable flow table lookup for incoming packets
 ENABLE_FLOW_LOOKUP=1
+# set this to 0 to disable the hash function used for FaaS-NFV experiments
+ENABLE_FAAS_HASH=1
 
 ifeq ($(RTE_SDK),)
 $(error "Please define RTE_SDK environment variable")
@@ -67,6 +69,10 @@ LDFLAGS += $(SRCDIR)/../onvm_nflib/$(RTE_TARGET)/libonvm.a
 
 ifeq ($(ENABLE_FLOW_LOOKUP), 1)
 CFLAGS +=-D FLOW_LOOKUP
+endif
+
+ifeq ($(ENABLE_FAAS_HASH), 1)
+CFLAGS +=-D FAAS_HASH
 endif
 
 # for newer gcc, e.g. 4.4, no-strict-aliasing may not be necessary

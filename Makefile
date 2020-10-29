@@ -37,11 +37,13 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ifeq ($(ONVM_HOME),)
-$(error "Please define ONVM_HOME environment variable")
+#$(error "Please define ONVM_HOME environment variable")
+export ONVM_HOME=$(pwd)
 endif
 
 ifeq ($(RTE_SDK),)
-$(error "Please define RTE_SDK environment variable")
+#$(error "Please define RTE_SDK environment variable")
+export RTE_SDK=$(ONVM_HOME)/dpdk
 endif
 
 all: onvm nfs

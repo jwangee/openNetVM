@@ -221,7 +221,9 @@ onvm_softrss(struct onvm_ft_ipv4_5tuple *key) {
         union rte_thash_tuple tuple;
         uint8_t rss_key_be[RTE_DIM(rss_symmetric_key)];
         uint32_t rss_l3l4;
-
+#ifdef FAAS_HASH
+        rss_l3l4 = key->dst_port;
+#else
         rte_convert_rss_key((uint32_t *)rss_symmetric_key, (uint32_t *)rss_key_be, RTE_DIM(rss_symmetric_key));
 
         tuple.v4.src_addr = rte_be_to_cpu_32(key->src_addr);
@@ -230,7 +232,7 @@ onvm_softrss(struct onvm_ft_ipv4_5tuple *key) {
         tuple.v4.dport = rte_be_to_cpu_16(key->dst_port);
 
         rss_l3l4 = rte_softrss_be((uint32_t *)&tuple, RTE_THASH_V4_L4_LEN, rss_key_be);
-
+#endif
         return rss_l3l4;
 }
 
