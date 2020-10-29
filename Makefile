@@ -44,10 +44,20 @@ ifeq ($(RTE_SDK),)
 $(error "Please define RTE_SDK environment variable")
 endif
 
-all:
+all: onvm nfs
 	# cd $(ONVM_HOME)/dpdk && make
+
+onvm:
 	cd $(ONVM_HOME)/onvm && make
+
+nfs:
 	cd $(ONVM_HOME)/examples && make
+
+docker: onvm nfs
+	docker build -t ch8728847/nfvnice:test --no-cache .
+
+docker-clean:
+	docker rm --force $(docker ps -a -q)
 
 .PHONY: tags
 

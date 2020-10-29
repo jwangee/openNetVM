@@ -428,6 +428,10 @@ int main(int argc, char *argv[]) {
                 lpm_setup(rules, num_rules);
         }
 
+        // Register this NF chain if it is an ingress node.
+        //struct onvm_flow_entry *flow_entry = NULL;
+        //onvm_flow_dir_nf_init();
+
         onvm_nflib_run(nf_local_ctx);
 
         lpm_teardown(rules, num_rules);

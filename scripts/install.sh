@@ -107,8 +107,8 @@ sed -i 's/CONFIG_RTE_EAL_IGB_UIO=n/CONFIG_RTE_EAL_IGB_UIO=y/g' "$RTE_SDK"/config
 
 sleep 1
 make config T="$RTE_TARGET"
-make T="$RTE_TARGET" -j 8
-make install T="$RTE_TARGET" -j 8
+make T="$RTE_TARGET" -j
+make install T="$RTE_TARGET" -j
 
 # Refresh sudo
 sudo -v
@@ -129,9 +129,10 @@ if [ "${PIPESTATUS[0]}" != 0 ] && [ -z "$ONVM_SKIP_FSTAB" ]; then
 fi
 
 # Configure local environment
-echo "Configuring environment"
-sleep 1
-scripts/setup_environment.sh
+#Do not bind NIC to dpdk at this point
+#echo "Configuring environment"
+#sleep 1
+#scripts/setup_environment.sh
 
 echo "ONVM INSTALL COMPLETED SUCCESSFULLY"
 

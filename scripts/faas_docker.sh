@@ -50,8 +50,8 @@ done
 
 DEVICES=()
 
-if [[ "${NAME}" == "" ]] || [[ "${ONVM}" == "" ]] ; then
-    echo -e "sudo ./docker.sh -h HUGEPAGES -o ONVM -n NAME [-D DEVICES] [-d DIRECTORY] [-c COMMAND]\n"
+if [[ "${NAME}" == "" ]] ; then
+    echo -e "sudo ./docker.sh -h HUGEPAGES -n NAME [-D DEVICES] [-d DIRECTORY] [-c COMMAND]\n"
     echo -e "\te.g. sudo ./docker.sh -h /hugepages -o /root/openNetVM -n Basic_Monitor_NF -D /dev/uio0,/dev/uio1"
     echo -e "\t\tThis will create a container with two NIC devices, uio0 and uio1,"
     echo -e "\t\thugepages mapped from the host's /hugepage directory and openNetVM"
@@ -68,17 +68,13 @@ if [[ "${DIR}" != "" ]] ; then
     DIR="--volume=${DIR}:/$(basename "${DIR}")"
 fi
 
-# warn users about go script ignoring manager checks
-echo "Please ensure the manager is running before starting dockerized NFs"
-
-#shellcheck disable=SC2086
-if [[ "${CMD}" == "" ]] ; then
+if [[ "${NAME}" == "master" ]] ; then
     sudo docker run \
         --ipc=host \
         --interactive --tty \
         --privileged \
-        --name="${NAME}" \
-        --hostname="${NAME}" \
+        --name=master \
+        --hostname=master \
         --network bridge \
         --volume=/sys/bus/pci/drivers:/sys/bus/pci/drivers \
         --volume=/dev:/dev \
@@ -87,24 +83,46 @@ if [[ "${CMD}" == "" ]] ; then
         --volume=/dev/hugepages:/dev/hugepages \
         ${DIR} \
         "${DEVICES[@]}" \
-        ch8728847/nfvnice:debug \
-        /bin/bash
+        ch8728847/nfvnice:test \
+        /app/onvm/go.sh -k 0 -n 0xF0 -s stdout -m 0,1,2,3 -c
 else
-    sudo docker run \
-        --ipc=host \
-        --detach=true \
-        --privileged \
-        --name="${NAME}" \
-        --hostname="${NAME}" \
-        --network bridge \
-        --volume=/sys/bus/pci/drivers:/sys/bus/pci/drivers \
-        --volume=/dev:/dev \
-        --volume=/sys/devices/system/node:/sys/devices/system/node \
-        --volume=/var/run:/var/run \
-        --volume=/dev/hugepages:/dev/hugepages \
-        ${DIR} \
-        "${DEVICES[@]}" \
-        ch8728847/nfvnice:debug \
-        /bin/bash -c "${CMD}"
+    # warn users about go script ignoring manager checks
+    echo "Please ensure the manager is running before starting dockerized NFs"
+    #shellcheck disable=SC2086
+    if [[ "${CMD}" == "" ]] ; then
+        sudo docker run \
+            --ipc=host \
+            --interactive --tty \
+            --privileged \
+            --name="${NAME}" \
+            --hostname="${NAME}" \
+            --network bridge \
+            --volume=/sys/bus/pci/drivers:/sys/bus/pci/drivers \
+            --volume=/dev:/dev \
+            --volume=/sys/devices/system/node:/sys/devices/system/node \
+            --volume=/var/run:/var/run \
+            --volume=/dev/hugepages:/dev/hugepages \
+            ${DIR} \
+            "${DEVICES[@]}" \
+            ch8728847/nfvnice:test \
+            /bin/bash
+    else
+        sudo docker run \
+            --ipc=host \
+            --detach=true \
+            --privileged \
+            --name="${NAME}" \
+            --hostname="${NAME}" \
+            --network bridge \
+            --volume=/sys/bus/pci/drivers:/sys/bus/pci/drivers \
+            --volume=/dev:/dev \
+            --volume=/sys/devices/system/node:/sys/devices/system/node \
+            --volume=/var/run:/var/run \
+            --volume=/dev/hugepages:/dev/hugepages \
+            ${DIR} \
+            "${DEVICES[@]}" \
+            ch8728847/nfvnice:test \
+            /bin/bash -c "${CMD}"
+    fi
 fi
 
