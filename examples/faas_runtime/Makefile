@@ -38,7 +38,7 @@ ifeq ($(RTE_SDK),)
 $(error "Please define RTE_SDK environment variable")
 endif
 
-RTE_TARGET ?= $(RTE_TARGET)
+RTE_TARGET ?= x86_64-native-linuxapp-gcc
 
 # Default target, can be overriden by command line or environment
 include $(RTE_SDK)/mk/rte.vars.mk
@@ -47,7 +47,7 @@ include $(RTE_SDK)/mk/rte.vars.mk
 APP = faas_runtime
 
 # all source are stored in SRCS-y
-SRCS-y := faas_runtime.c
+SRCS-y := faas_runtime.c chacha.c
 
 # OpenNetVM path
 ONVM= $(SRCDIR)/../../onvm

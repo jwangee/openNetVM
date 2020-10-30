@@ -31,6 +31,9 @@
 #include "onvm_pkt_helper.h"
 #include "onvm_config_common.h"
 
+// Customized NFs
+#include "chacha.h"
+
 #define NF_TAG "faas_runtime"
 
 #define MAX_RULES 256
@@ -38,7 +41,13 @@
 
 static int nf_idx = 0;
 static int faas_tcp_port = 0;
+
 int bypass_per_packet_cycle = 10000;
+
+//extern struct chacha_ctx;
+//extern int chacha_payload_offset;
+//extern uint8_t tc_key[32];
+//extern uint8_t tc_iv[8];
 
 static uint16_t destination;
 static int debug = 0;
@@ -46,7 +55,7 @@ char *rule_file = NULL;
 
 /* Structs that contain information to setup LPM and its rules */
 struct lpm_request *firewall_req;
-static struct firewall_pkt_stats stats;
+static struct faas_runtime_pkt_stats stats;
 struct rte_lpm *lpm_tbl;
 struct onvm_fw_rule **rules;
 
@@ -64,10 +73,11 @@ struct onvm_fw_rule {
 };
 
 /* Struct for printing stats */
-struct firewall_pkt_stats {
+struct faas_runtime_pkt_stats {
         uint64_t pkt_drop;
         uint64_t pkt_accept;
         uint64_t pkt_not_ipv4;
+        uint64_t pkt_not_tcp_udp;
         uint64_t pkt_total;
 };
 
@@ -212,7 +222,54 @@ bypass_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
 static int
 chacha_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
                __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
-    return 0;
+        int udp_pkt, tcp_pkt;
+        int payload_size = 0;
+        size_t hdr_length;
+        struct rte_ipv4_hdr *ip = NULL;
+        struct rte_tcp_hdr *tcp = NULL;
+        struct rte_udp_hdr *udp = NULL;
+
+        stats.pkt_total++;
+
+        /* Check if we have a valid IP header */
+        if (!onvm_pkt_is_ipv4(pkt)) {
+                meta->action = ONVM_NF_ACTION_DROP;
+                stats.pkt_not_ipv4++;
+                return 0;
+        }
+
+        ip = onvm_pkt_ipv4_hdr(pkt);
+        size_t ip_hdr_len = ((uint16_t)(rte_be_to_cpu_16(ip->total_length))) << 2;
+        udp_pkt = onvm_pkt_is_udp(pkt);
+        tcp_pkt = onvm_pkt_is_tcp(pkt);
+        uint8_t *payload = NULL;
+
+        /* Check if we have a valid TCP/UDP header */
+        if (!udp_pkt && !tcp_pkt) {
+                meta->action = ONVM_NF_ACTION_DROP;
+                stats.pkt_not_tcp_udp++;
+                return 0;
+        }
+
+        if (udp_pkt) {
+                hdr_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+                payload = rte_pktmbuf_mtod_offset(pkt, uint8_t *,
+                            hdr_length + chacha_payload_offset);
+                payload_size = pkt->pkt_len - hdr_length;
+        } else {
+                hdr_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
+                payload = rte_pktmbuf_mtod_offset(pkt, uint8_t * ,
+                            hdr_length + chacha_payload_offset);
+                payload_size = pkt->pkt_len - hdr_length;
+        }
+
+        chacha_process_packet(payload, payload_size);
+
+        meta->action = ONVM_NF_ACTION_TONF;
+        meta->destination = destination;
+        stats.pkt_accept++;
+        if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
+        return 0;
 }
 
 // ACL
@@ -449,6 +506,7 @@ int main(int argc, char *argv[]) {
             break;
         case 3:
             nf_function_table->pkt_handler = &chacha_packet_handler;
+            chacha_module_init();
             break;
         case 4:
             nf_function_table->pkt_handler = &l4nat_packet_handler;
