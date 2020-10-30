@@ -52,6 +52,7 @@ SRCS-y := faas_runtime.c
 # OpenNetVM path
 ONVM= $(SRCDIR)/../../onvm
 
+CFLAGS += -D FAAS_HASH
 CFLAGS += -O3 $(USER_FLAGS)
 
 CFLAGS += -I$(ONVM)/onvm_nflib

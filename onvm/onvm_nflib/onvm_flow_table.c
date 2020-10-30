@@ -71,7 +71,7 @@ onvm_ft_create(int cnt, int entry_size) {
         /* create ipv4 hash table. use core number and cycle counter to get a unique name. */
         ipv4_hash_params->entries = cnt;
         ipv4_hash_params->key_len = sizeof(struct onvm_ft_ipv4_5tuple);
-        ipv4_hash_params->hash_func = NULL;
+        ipv4_hash_params->hash_func = &onvm_ft_faas_hash_crc;
         ipv4_hash_params->hash_func_init_val = 0;
         ipv4_hash_params->name = name;
         ipv4_hash_params->socket_id = rte_socket_id();

@@ -70,6 +70,20 @@ onvm_pkt_process_rx_batch(struct queue_mgr *rx_mgr, struct rte_mbuf *pkts[], uin
                 meta = (struct onvm_pkt_meta *)&(((struct rte_mbuf *)pkts[i])->udata64);
                 meta->src = 0;
                 meta->chain_index = 0;
+
+#ifdef FAAS_HASH
+                struct rte_ipv4_hdr *ipv4_hdr = onvm_pkt_ipv4_hdr(pkts[i]);
+                struct rte_tcp_hdr *tcp_hdr;
+                struct rte_udp_hdr *udp_hdr;
+                if (ipv4_hdr->next_proto_id == IP_PROTOCOL_TCP) {
+                    tcp_hdr = onvm_pkt_tcp_hdr(pkts[i]);
+                    pkts[i]->hash.rss = tcp_hdr->dst_port;
+                } else if (ipv4_hdr->next_proto_id == IP_PROTOCOL_UDP) {
+                    udp_hdr = onvm_pkt_udp_hdr(pkts[i]);
+                    pkts[i]->hash.rss = udp_hdr->dst_port;
+                }
+#endif
+
 #ifdef FLOW_LOOKUP
                 ret = onvm_flow_dir_get_pkt(pkts[i], &flow_entry);
                 if (ret >= 0) {

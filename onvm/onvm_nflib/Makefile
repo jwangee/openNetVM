@@ -36,12 +36,25 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# set this to 0 to disable flow table lookup for incoming packets
+ENABLE_FLOW_LOOKUP=1
+# set this to 0 to disable the hash function used for FaaS-NFV experiments
+ENABLE_FAAS_HASH=1
+
 ifeq ($(RTE_SDK),)
 $(error "Please define RTE_SDK environment variable")
 endif
 
 ifeq ($(ONVM_HOME),)
 $(error "Please define the ONVM_HOME environment variable")
+endif
+
+ifeq ($(ENABLE_FLOW_LOOKUP), 1)
+CFLAGS +=-D FLOW_LOOKUP
+endif
+
+ifeq ($(ENABLE_FAAS_HASH), 1)
+CFLAGS +=-D FAAS_HASH
 endif
 
 # Default target, can be overriden by command line or environment

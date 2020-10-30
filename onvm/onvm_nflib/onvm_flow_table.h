@@ -149,6 +149,24 @@ onvm_ft_fill_key(struct onvm_ft_ipv4_5tuple *key, struct rte_mbuf *pkt) {
         }
         ipv4_hdr = onvm_pkt_ipv4_hdr(pkt);
         memset(key, 0, sizeof(struct onvm_ft_ipv4_5tuple));
+
+        key->proto = 0;
+        key->src_addr = 0;
+        key->dst_addr = 0;
+        if (ipv4_hdr->next_proto_id == IP_PROTOCOL_TCP) {
+                tcp_hdr = onvm_pkt_tcp_hdr(pkt);
+                key->src_port = 0;
+                key->dst_port = tcp_hdr->dst_port;
+        } else if (ipv4_hdr->next_proto_id == IP_PROTOCOL_UDP) {
+                udp_hdr = onvm_pkt_udp_hdr(pkt);
+                key->src_port = 0;
+                key->dst_port = udp_hdr->dst_port;
+        } else {
+                key->src_port = 0;
+                key->dst_port = 0;
+        }
+        return 0;
+
         key->proto = ipv4_hdr->next_proto_id;
         key->src_addr = ipv4_hdr->src_addr;
         key->dst_addr = ipv4_hdr->dst_addr;
@@ -215,15 +233,28 @@ onvm_ft_ipv4_hash_crc(const void *data, __rte_unused uint32_t data_len, uint32_t
         return (init_val);
 }
 
+/* Hash a flow key to get an int. From FaaS runtime */
+static inline uint32_t
+onvm_ft_faas_hash_crc(const void *data, __rte_unused uint32_t data_len, uint32_t init_val) {
+        const union ipv4_5tuple_host *k;
+        k = (const union ipv4_5tuple_host*)data;
+        if (k != NULL) {
+            RTE_LOG(INFO, APP, "pkt hash %d\n", (uint32_t)k->port_dst);
+            return (uint32_t)k->port_dst;
+        }
+
+        return init_val;
+}
+
 /*software caculate RSS*/
 static inline uint32_t
 onvm_softrss(struct onvm_ft_ipv4_5tuple *key) {
         union rte_thash_tuple tuple;
         uint8_t rss_key_be[RTE_DIM(rss_symmetric_key)];
-        uint32_t rss_l3l4;
-#ifdef FAAS_HASH
+        uint32_t rss_l3l4 = 0;
         rss_l3l4 = key->dst_port;
-#else
+        return rss_l3l4;
+
         rte_convert_rss_key((uint32_t *)rss_symmetric_key, (uint32_t *)rss_key_be, RTE_DIM(rss_symmetric_key));
 
         tuple.v4.src_addr = rte_be_to_cpu_32(key->src_addr);
@@ -232,7 +263,6 @@ onvm_softrss(struct onvm_ft_ipv4_5tuple *key) {
         tuple.v4.dport = rte_be_to_cpu_16(key->dst_port);
 
         rss_l3l4 = rte_softrss_be((uint32_t *)&tuple, RTE_THASH_V4_L4_LEN, rss_key_be);
-#endif
         return rss_l3l4;
 }
 

@@ -13,6 +13,11 @@
 #include <string.h>
 #include "cJSON.h"
 
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <rte_common.h>
 #include <rte_mbuf.h>
 #include <rte_ip.h>
@@ -20,6 +25,8 @@
 
 #include <rte_lpm.h>
 
+#include "onvm_flow_dir.h"
+#include "onvm_flow_table.h"
 #include "onvm_nflib.h"
 #include "onvm_pkt_helper.h"
 #include "onvm_config_common.h"
@@ -30,6 +37,7 @@
 #define NUM_TBLS 8
 
 static int nf_idx = 0;
+static int faas_tcp_port = 0;
 int bypass_per_packet_cycle = 10000;
 
 static uint16_t destination;
@@ -70,6 +78,7 @@ static void
 usage(const char *progname) {
         printf("Usage: %s [EAL args] -- [NF_LIB args] -- -p <print_delay> -f <rules file> [-b]\n\n", progname);
         printf("Flags:\n");
+        printf(" - `-t TCP_PORT`: Packets with dst tcp port will be forwarded to this module\n");
         printf(" - `-d DST`: Destination Service ID to forward to\n");
         printf(" - `-p PRINT_DELAY`: Number of packets between each print, e.g. `-p 1` prints every packets.\n");
         printf(" - `-b`: Debug mode: Print each incoming packets source/destination"
@@ -82,11 +91,14 @@ usage(const char *progname) {
  */
 static int
 parse_app_args(int argc, char *argv[], const char *progname) {
-        int c, dst_flag = 0, rules_init = 0;
+        int c, dst_flag = 0, rules_init = 1;
 
-        while ((c = getopt(argc, argv, "t:d:f:p:b")) != -1) {
+        while ((c = getopt(argc, argv, "t:i:d:f:p:b")) != -1) {
                 switch (c) {
                         case 't':
+                                faas_tcp_port = strtoul(optarg, NULL, 10);
+                                break;
+                        case 'i':
                                 nf_idx = strtoul(optarg, NULL, 10);
                                 break;
                         case 'd':
@@ -166,6 +178,16 @@ l4nat_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
                __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
     return 0;
 }
+
+/* The code prints the SDN flow table at the ingress.
+struct onvm_flow_entry *flow_entry;
+struct onvm_ft_ipv4_5tuple fk;
+int ret = onvm_ft_lookup_pkt(sdn_ft, pkt, &flow_entry);
+onvm_ft_fill_key(&fk, pkt);
+RTE_LOG(INFO, APP, "flowkey: [%x:%u:, %x:%u, %u]\n", fk.src_addr, fk.src_port, fk.dst_addr, fk.dst_port, fk.proto);
+int tbl_index = rte_hash_lookup_with_hash(sdn_ft->hash, (const void *)&fk, pkt->hash.rss);
+RTE_LOG(INFO, APP, "rss %d, idx %d, idx %d\n", pkt->hash.rss, ret, tbl_index);
+*/
 
 // Bypass
 static int
@@ -369,11 +391,22 @@ struct onvm_fw_rule
         return rules;
 }
 
+static uint32_t get_ipv4_value(const char *ip_addr){
+        if (NULL == ip_addr) {
+                return 0;
+        }
+
+        struct sockaddr_in antelope;
+        inet_aton(ip_addr, &antelope.sin_addr);
+        return rte_be_to_cpu_32(antelope.sin_addr.s_addr);
+}
+
 int main(int argc, char *argv[]) {
         struct onvm_nf_local_ctx *nf_local_ctx;
         struct onvm_nf_function_table *nf_function_table;
         struct onvm_fw_rule **rules;
         int arg_offset, num_rules;
+        int ret;
 
         const char *progname = argv[0];
         stats.pkt_drop = 0;
@@ -394,6 +427,8 @@ int main(int argc, char *argv[]) {
                         rte_exit(EXIT_FAILURE, "Failed ONVM init\n");
                 }
         }
+        uint16_t curr_service_id = nf_local_ctx->nf->service_id;
+        printf("curr service_id = %d\n", curr_service_id);
 
         argc -= arg_offset;
         argv += arg_offset;
@@ -428,13 +463,72 @@ int main(int argc, char *argv[]) {
                 lpm_setup(rules, num_rules);
         }
 
-        // Register this NF chain if it is an ingress node.
-        //struct onvm_flow_entry *flow_entry = NULL;
-        //onvm_flow_dir_nf_init();
+        /* Map the sdn_ft table */
+        printf("Target traffic = %d\n", faas_tcp_port);
+        if (faas_tcp_port != 0) {
+            onvm_flow_dir_nf_init();
+
+            struct onvm_flow_entry *flow_entry = NULL;
+            struct onvm_ft_ipv4_5tuple *fk = NULL;
+            struct onvm_ft_ipv4_5tuple ipv4_5tuple;
+
+            struct onvm_service_chain *schain = NULL;
+            schain = onvm_sc_create();
+            if (schain == NULL) {
+                rte_exit(EXIT_FAILURE, "Cannot allocate memory for SC Entry\n");
+            }
+            onvm_sc_append_entry(schain, ONVM_NF_ACTION_TONF, curr_service_id);
+
+            ipv4_5tuple.src_addr = get_ipv4_value("10.0.0.1");
+            ipv4_5tuple.dst_addr = get_ipv4_value("10.0.0.1");
+            ipv4_5tuple.src_port = (uint16_t)faas_tcp_port;
+            ipv4_5tuple.dst_port = (uint16_t)faas_tcp_port;
+            ipv4_5tuple.proto = 0;
+
+            //RTE_CACHE_LINE_SIZE
+            fk = rte_calloc("flow_key",1, sizeof(struct onvm_ft_ipv4_5tuple), 0);
+            fk->src_addr = 0;
+            fk->dst_addr = 0;
+            fk->src_port = 0;
+            fk->dst_port = rte_cpu_to_be_16(ipv4_5tuple.dst_port);
+            fk->proto = ipv4_5tuple.proto;
+            printf("Flow entry key = [%x:%u:, %x:%u, %u]\n", fk->src_addr, fk->src_port, fk->dst_addr, fk->dst_port, fk->proto);
+
+            // Check if the entry has existed.
+            ret = onvm_flow_dir_get_key(fk, &flow_entry);
+            if (ret == -ENOENT) {
+                flow_entry = NULL;
+                ret = onvm_flow_dir_add_key(fk, &flow_entry);
+                printf("Adding fresh Key [%x]\n", fk->src_addr);
+            }
+            else if (ret >= 0) {
+                // Entry already exists
+                rte_free(flow_entry->key);
+                printf("Flow entry has already existed. Override it..\n");
+            }
+            else {
+                rte_free(fk);
+                printf("Unknown Failure in get_key()!\n");
+                return ret;
+            }
+
+            if (flow_entry == NULL) {
+                printf("Failed flow_entry Allocations!!\n" );
+                return -ENOMEM;
+            }
+
+            //(void)onvm_flow_dir_reset_entry(flow_entry);
+            flow_entry->key = fk;
+            flow_entry->sc = schain;
+            printf("%d %d\n", fk->dst_port, onvm_softrss(fk));
+        }
 
         onvm_nflib_run(nf_local_ctx);
 
-        lpm_teardown(rules, num_rules);
+        if (rule_file != NULL) {
+            lpm_teardown(rules, num_rules);
+        }
+
         onvm_nflib_stop(nf_local_ctx);
         printf("If we reach here, program is ending\n");
         return 0;

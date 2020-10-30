@@ -36,15 +36,9 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-ifeq ($(ONVM_HOME),)
-#$(error "Please define ONVM_HOME environment variable")
-export ONVM_HOME=$(pwd)
-endif
-
-ifeq ($(RTE_SDK),)
-#$(error "Please define RTE_SDK environment variable")
-export RTE_SDK=$(ONVM_HOME)/dpdk
-endif
+ONVM_HOME = $(dir $(abspath $(firstword $(MAKEFILE_LIST))))
+RTE_SDK = $(abspath $(ONVM_HOME)/dpdk)
+RTE_TARGET = build
 
 all: onvm nfs
 	# cd $(ONVM_HOME)/dpdk && make
