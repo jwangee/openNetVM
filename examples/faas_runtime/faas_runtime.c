@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <getopt.h>
 #include <string.h>
+#include <assert.h>
 #include "cJSON.h"
 
 #include <sys/socket.h>
@@ -23,8 +24,6 @@
 #include <rte_ip.h>
 #include <rte_malloc.h>
 
-#include <rte_lpm.h>
-
 #include "onvm_flow_dir.h"
 #include "onvm_flow_table.h"
 #include "onvm_nflib.h"
@@ -32,7 +31,9 @@
 #include "onvm_config_common.h"
 
 // Customized NFs
+#include "acl.h"
 #include "chacha.h"
+#include "distributed_nat.h"
 
 #define NF_TAG "faas_runtime"
 
@@ -41,36 +42,21 @@
 
 static int nf_idx = 0;
 static int faas_tcp_port = 0;
+int bypass_per_packet_cycle = 100;
 
-int bypass_per_packet_cycle = 10000;
-
-//extern struct chacha_ctx;
-//extern int chacha_payload_offset;
-//extern uint8_t tc_key[32];
-//extern uint8_t tc_iv[8];
-
+// destination specifies the next NF instance
 static uint16_t destination;
 static int debug = 0;
 char *rule_file = NULL;
 
-/* Structs that contain information to setup LPM and its rules */
-struct lpm_request *firewall_req;
+/* The per-NF packet counter */
 static struct faas_runtime_pkt_stats stats;
-struct rte_lpm *lpm_tbl;
-struct onvm_fw_rule **rules;
 
 /* Number of packets between each print */
 static uint32_t print_delay = 10000000;
 
 /* Shared data structure containing host port info */
 extern struct port_info *ports;
-
-/* Struct for the firewall LPM rules */
-struct onvm_fw_rule {
-        uint32_t src_ip;
-        uint8_t depth;
-        uint8_t action;
-};
 
 /* Struct for printing stats */
 struct faas_runtime_pkt_stats {
@@ -182,13 +168,6 @@ do_stats_display(void) {
         printf("\n\n");
 }
 
-// Distributed NAT
-static int
-l4nat_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
-               __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
-    return 0;
-}
-
 /* The code prints the SDN flow table at the ingress.
 struct onvm_flow_entry *flow_entry;
 struct onvm_ft_ipv4_5tuple fk;
@@ -199,22 +178,34 @@ int tbl_index = rte_hash_lookup_with_hash(sdn_ft->hash, (const void *)&fk, pkt->
 RTE_LOG(INFO, APP, "rss %d, idx %d, idx %d\n", pkt->hash.rss, ret, tbl_index);
 */
 
+void faas_handle_egress(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta) {
+    struct rte_ether_hdr *eth;
+    struct rte_ether_addr tmp;
+    eth = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+
+    rte_ether_addr_copy(&(eth->d_addr), &tmp);
+    rte_ether_addr_copy(&(eth->s_addr), &(eth->d_addr));
+    rte_ether_addr_copy(&tmp, &(eth->s_addr));
+
+    meta->action = ONVM_NF_ACTION_OUT;
+    meta->destination = 0;
+}
+
 // Bypass
 static int
 bypass_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
                __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
         // Waits every 10 packets.
-        if (stats.pkt_accept % 10) {
-            uint64_t end = rte_rdtsc() + 10 * bypass_per_packet_cycle;
-            while (rte_rdtsc() < end) {
-                _mm_pause();
-            }
+        uint64_t end = rte_rdtsc() + 10 * bypass_per_packet_cycle;
+        while (rte_rdtsc() < end) {
+            _mm_pause();
         }
 
         meta->action = ONVM_NF_ACTION_TONF;
         meta->destination = destination;
         stats.pkt_accept++;
         if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
+        faas_handle_egress(pkt, meta);
         return 0;
 }
 
@@ -252,16 +243,18 @@ chacha_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         }
 
         if (udp_pkt) {
-                hdr_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
+                hdr_length = 10 + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr);
                 payload = rte_pktmbuf_mtod_offset(pkt, uint8_t *,
                             hdr_length + chacha_payload_offset);
-                payload_size = pkt->pkt_len - hdr_length;
+                payload_size = pkt->pkt_len - hdr_length - chacha_payload_offset;
         } else {
-                hdr_length = sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
+                hdr_length = 10 + sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_tcp_hdr);
                 payload = rte_pktmbuf_mtod_offset(pkt, uint8_t * ,
                             hdr_length + chacha_payload_offset);
-                payload_size = pkt->pkt_len - hdr_length;
+                payload_size = pkt->pkt_len - hdr_length - chacha_payload_offset;
         }
+
+        if (debug) RTE_LOG(INFO, APP, "pkt: %d==%d, chacha offset: %d, header length %ld, payload: %d \n", pkt->pkt_len, pkt->data_len, chacha_payload_offset, hdr_length, payload_size);
 
         chacha_process_packet(payload, payload_size);
 
@@ -269,6 +262,7 @@ chacha_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         meta->destination = destination;
         stats.pkt_accept++;
         if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
+        faas_handle_egress(pkt, meta);
         return 0;
 }
 
@@ -291,14 +285,16 @@ acl_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         stats.pkt_total++;
 
         if (!onvm_pkt_is_ipv4(pkt)) {
-                if (debug) RTE_LOG(INFO, APP, "Packet received not ipv4\n");
                 stats.pkt_not_ipv4++;
                 meta->action = ONVM_NF_ACTION_DROP;
                 return 0;
         }
 
         ipv4_hdr = onvm_pkt_ipv4_hdr(pkt);
-        ret = rte_lpm_lookup(lpm_tbl, rte_be_to_cpu_32(ipv4_hdr->src_addr), &rule);
+        uint32_t src_ip = rte_be_to_cpu_32(ipv4_hdr->src_addr);
+        uint32_t dst_ip = rte_be_to_cpu_32(ipv4_hdr->dst_addr);
+        ret = onvm_acl_hit_rule(src_ip, dst_ip, 0, 0, &rule);
+        //ret = rte_lpm_lookup(lpm_tbl, rte_be_to_cpu_32(ipv4_hdr->src_addr), &rule);
 
         if (debug) onvm_pkt_parse_char_ip(ip_string, rte_be_to_cpu_32(ipv4_hdr->src_addr));
 
@@ -326,6 +322,113 @@ acl_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         return 0;
 }
 
+// Distributed NAT
+static int
+l4nat_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
+               __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
+    struct rte_ipv4_hdr *ipv4_hdr = NULL;
+    struct rte_tcp_hdr *tcp = NULL;
+    struct rte_udp_hdr *udp = NULL;
+    int tcp_pkt, udp_pkt;
+    static uint32_t counter = 0;
+    int ret;
+    int dir = 0;
+    uint32_t track_ip = 0;
+    char ip_string[16];
+
+    if (++counter == print_delay) {
+            do_stats_display();
+            counter = 0;
+    }
+
+    stats.pkt_total++;
+
+    if (!onvm_pkt_is_ipv4(pkt)) {
+            stats.pkt_not_ipv4++;
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
+    }
+
+    ipv4_hdr = onvm_pkt_ipv4_hdr(pkt);
+    uint32_t src_ip = rte_be_to_cpu_32(ipv4_hdr->src_addr);
+    uint32_t dst_ip = rte_be_to_cpu_32(ipv4_hdr->dst_addr);
+
+    // dir=0 (forward traffic); dir=1 (reverse traffic)
+    if (is_internal_traffic(src_ip)) {
+            dir = 0;
+    } else if (is_internal_traffic(dst_ip)) {
+            dir = 1;
+    } else {
+            stats.pkt_drop++;
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
+    }
+
+    udp_pkt = onvm_pkt_is_udp(pkt);
+    tcp_pkt = onvm_pkt_is_tcp(pkt);
+
+    /* Check if we have a valid TCP/UDP header */
+    if (!udp_pkt && !tcp_pkt) {
+            stats.pkt_not_tcp_udp++;
+            meta->action = ONVM_NF_ACTION_DROP;
+            return 0;
+    }
+
+    struct onvm_ft_ipv4_5tuple nat_key;
+    struct Entry* nat_entry = NULL;
+
+    if (udp_pkt) {
+            uint16_t sport = rte_be_to_cpu_16(udp->src_port);
+            uint16_t dport = rte_be_to_cpu_16(udp->dst_port);
+            onvm_nat_fill_key(&nat_key, src_ip, dst_ip, sport, dport, dir);
+    } else {
+            uint16_t sport = rte_be_to_cpu_16(tcp->src_port);
+            uint16_t dport = rte_be_to_cpu_16(tcp->dst_port);
+            onvm_nat_fill_key(&nat_key, src_ip, dst_ip, sport, dport, dir);
+    }
+
+    ret = onvm_natt_lookup_key(nat_table, &nat_key, (char **)&nat_entry);
+
+    if (ret < 0) {
+        // Add a new entry;
+        ret = onvm_natt_add_key(nat_table, &nat_key, (char **)&nat_entry);
+        if (nat_entry != NULL) {
+            nat_entry->ip = rte_be_to_cpu_32(get_ipv4_value("10.10.10.10"));
+            nat_entry->port = 8081;
+            nat_entry->active = true;
+            nat_entry->last_refresh = rte_rdtsc();
+        }
+    }
+
+    if (dir == 0) {
+        // refresh the key-entry pair.
+        nat_entry->last_refresh = rte_rdtsc();
+    }
+
+    if (udp_pkt) {
+        if (dir == 0) {
+            ipv4_hdr->src_addr = rte_cpu_to_be_32(nat_entry->ip);
+            udp->src_port = rte_cpu_to_be_16(nat_entry->port);
+        } else {
+            ipv4_hdr->dst_addr = rte_cpu_to_be_32(nat_entry->ip);
+            udp->dst_port = rte_cpu_to_be_16(nat_entry->port);
+        }
+    } else {
+        if (dir == 0) {
+            ipv4_hdr->src_addr = rte_cpu_to_be_32(nat_entry->ip);
+            tcp->src_port = rte_cpu_to_be_16(nat_entry->port);
+        } else {
+            ipv4_hdr->dst_addr = rte_cpu_to_be_32(nat_entry->ip);
+            tcp->dst_port = rte_cpu_to_be_16(nat_entry->port);
+        }
+    }
+
+    meta->action = ONVM_NF_ACTION_TONF;
+    meta->destination = destination;
+    stats.pkt_accept++;
+    return 0;
+}
+
 static int
 packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
                __attribute__((unused)) struct onvm_nf_local_ctx *nf_local_ctx) {
@@ -343,126 +446,11 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
     };
 }
 
-static int
-lpm_setup(struct onvm_fw_rule **rules, int num_rules) {
-        int i, status, ret;
-        uint32_t ip;
-        char name[64];
-        char ip_string[16];
-
-        firewall_req = (struct lpm_request *) rte_malloc(NULL, sizeof(struct lpm_request), 0);
-
-        if (!firewall_req) return 0;
-
-        snprintf(name, sizeof(name), "fw%d-%"PRIu64, rte_lcore_id(), rte_get_tsc_cycles());
-        firewall_req->max_num_rules = 1024;
-        firewall_req->num_tbl8s = 24;
-        firewall_req->socket_id = rte_socket_id();
-        snprintf(firewall_req->name, sizeof(name), "%s", name);
-        status = onvm_nflib_request_lpm(firewall_req);
-
-        if (status < 0) {
-                rte_exit(EXIT_FAILURE, "Cannot get lpm region for firewall\n");
-        }
-
-        lpm_tbl = rte_lpm_find_existing(name);
-
-        if (lpm_tbl == NULL) {
-                printf("No existing LPM_TBL\n");
-        }
-
-        for (i = 0; i < num_rules; ++i) {
-                ip = rules[i]->src_ip;
-                onvm_pkt_parse_char_ip(ip_string, ip);
-                printf("RULE %d: { ip: %s, depth: %d, action: %d }\n", i, ip_string, rules[i]->depth, rules[i]->action);
-                ret = rte_lpm_add(lpm_tbl, rules[i]->src_ip, rules[i]->depth, rules[i]->action);
-                if (ret < 0) {
-                        printf("ERROR ADDING RULE %d\n", ret);
-                        return 1;
-                }
-        }
-        rte_free(firewall_req);
-
-        return 0;
-}
-
-static void
-lpm_teardown(struct onvm_fw_rule **rules, int num_rules) {
-        int i;
-
-        if (rules) {
-                for (i = 0; i < num_rules; ++i) {
-                        if (rules[i]) free(rules[i]);
-                }
-                free(rules);
-        }
-
-        if (lpm_tbl) {
-                rte_lpm_free(lpm_tbl);
-        }
-
-        if (rule_file) {
-                free(rule_file);
-        }
-}
-
-struct onvm_fw_rule
-**setup_rules(int *total_rules, char *rules_file) {
-        int ip[4];
-        int num_rules, ret;
-        int i = 0;
-
-        cJSON *rules_json = onvm_config_parse_file(rules_file);
-        cJSON *rules_ip = NULL;
-        cJSON *depth = NULL;
-        cJSON *action = NULL;
-
-        if (rules_json == NULL) {
-                rte_exit(EXIT_FAILURE, "%s file could not be parsed/not found. Assure rules file"
-                                       " the directory to the rules file is being specified.\n", rules_file);
-        }
-
-        num_rules = onvm_config_get_item_count(rules_json);
-        *total_rules = num_rules;
-        rules = (struct onvm_fw_rule **) malloc(num_rules * sizeof(struct onvm_fw_rule *));
-        rules_json = rules_json->child;
-
-        while (rules_json != NULL) {
-                rules_ip = cJSON_GetObjectItem(rules_json, "ip");
-                depth = cJSON_GetObjectItem(rules_json, "depth");
-                action = cJSON_GetObjectItem(rules_json, "action");
-
-                if (rules_ip == NULL) rte_exit(EXIT_FAILURE, "IP not found/invalid\n");
-                if (depth == NULL) rte_exit(EXIT_FAILURE, "Depth not found/invalid\n");
-                if (action == NULL) rte_exit(EXIT_FAILURE, "Action not found/invalid\n");
-
-                rules[i] = (struct onvm_fw_rule *) malloc(sizeof(struct onvm_fw_rule));
-                onvm_pkt_parse_ip(rules_ip->valuestring, &rules[i]->src_ip);
-                rules[i]->depth = depth->valueint;
-                rules[i]->action = action->valueint;
-                rules_json = rules_json->next;
-                i++;
-        }
-        cJSON_Delete(rules_json);
-
-        return rules;
-}
-
-static uint32_t get_ipv4_value(const char *ip_addr){
-        if (NULL == ip_addr) {
-                return 0;
-        }
-
-        struct sockaddr_in antelope;
-        inet_aton(ip_addr, &antelope.sin_addr);
-        return rte_be_to_cpu_32(antelope.sin_addr.s_addr);
-}
-
 int main(int argc, char *argv[]) {
         struct onvm_nf_local_ctx *nf_local_ctx;
         struct onvm_nf_function_table *nf_function_table;
         struct onvm_fw_rule **rules;
-        int arg_offset, num_rules;
+        int arg_offset;
         int ret;
 
         const char *progname = argv[0];
@@ -505,10 +493,12 @@ int main(int argc, char *argv[]) {
             nf_function_table->pkt_handler = &acl_packet_handler;
             break;
         case 3:
-            nf_function_table->pkt_handler = &chacha_packet_handler;
             chacha_module_init();
+            nf_function_table->pkt_handler = &chacha_packet_handler;
             break;
         case 4:
+            onvm_nat_dir_init();
+            assert(nat_table != NULL);
             nf_function_table->pkt_handler = &l4nat_packet_handler;
             break;
         default:
@@ -517,8 +507,10 @@ int main(int argc, char *argv[]) {
         };
 
         if (rule_file != NULL) {
-                rules = setup_rules(&num_rules, rule_file);
-                lpm_setup(rules, num_rules);
+                rules = setup_rules_from_file(&acl_num_rules, rule_file);
+                lpm_setup(rules, acl_num_rules);
+        } else if (nf_idx == 2) {
+                rules = setup_rules(&acl_num_rules);
         }
 
         /* Map the sdn_ft table */
@@ -584,7 +576,12 @@ int main(int argc, char *argv[]) {
         onvm_nflib_run(nf_local_ctx);
 
         if (rule_file != NULL) {
-            lpm_teardown(rules, num_rules);
+            lpm_teardown(rules, acl_num_rules);
+            free(rule_file);
+        }
+
+        if (nat_table != NULL) {
+            onvm_natt_free(nat_table);
         }
 
         onvm_nflib_stop(nf_local_ctx);

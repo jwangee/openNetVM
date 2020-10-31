@@ -47,7 +47,7 @@ include $(RTE_SDK)/mk/rte.vars.mk
 APP = faas_runtime
 
 # all source are stored in SRCS-y
-SRCS-y := faas_runtime.c chacha.c
+SRCS-y := faas_runtime.c chacha.c acl.c distributed_nat.c
 
 # OpenNetVM path
 ONVM= $(SRCDIR)/../../onvm

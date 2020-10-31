@@ -138,6 +138,7 @@ onvm_ft_get_data(struct onvm_ft *table, int32_t index) {
         return &table->data[index * table->entry_size];
 }
 
+// FaaS-hack version.
 static inline int
 onvm_ft_fill_key(struct onvm_ft_ipv4_5tuple *key, struct rte_mbuf *pkt) {
         struct rte_ipv4_hdr *ipv4_hdr;
