@@ -109,6 +109,9 @@ onvm_pkt_process_tx_batch(struct queue_mgr *tx_mgr, struct rte_mbuf *pkts[], uin
                         onvm_pkt_process_next_action(tx_mgr, pkts[i], nf);
                 } else if (meta->action == ONVM_NF_ACTION_TONF) {
                         nf->stats.act_tonf++;
+                        // NFVNice
+                        (meta->chain_index)++;
+                        // End NFVNice
                         onvm_pkt_enqueue_nf(tx_mgr, meta->destination, pkts[i], nf);
                 } else if (meta->action == ONVM_NF_ACTION_OUT) {
                         if (tx_mgr->mgr_type_t != MGR) {
@@ -201,6 +204,35 @@ onvm_pkt_enqueue_nf(struct queue_mgr *tx_mgr, uint16_t dst_service_id, struct rt
                         source_nf->stats.tx_drop++;
                 return;
         }
+
+        // NFVNice
+        struct onvm_pkt_meta *meta = (struct onvm_pkt_meta*) &(((struct rte_mbuf*)pkt)->udata64);
+        struct onvm_flow_entry *flow_entry = NULL;
+        get_flow_entry(pkt, &flow_entry);
+        if(meta ||flow_entry) {
+                ; // do nothing :: to avoid compilation error
+        }
+        if (flow_entry && flow_entry->sc) {
+
+#if defined(NF_BACKPRESSURE_APPROACH_2) || defined(USE_BKPR_V2_IN_TIMER_MODE)
+                // this information is needed only for NF based throttling apporach; packet drop approach is more in-line.
+                flow_entry->sc->nf_instance_id[meta->chain_index] = (uint8_t)nf->instance_id;
+#endif  //NF_BACKPRESSURE_APPROACH_2
+
+#ifdef NF_BACKPRESSURE_APPROACH_1
+                // We want to throttle the packets at the upstream only iff (a) the packet belongs to the service chain whose Downstream NF indicates overflow, (b) this NF is upstream component for the service chain, and not a downstream NF (c) this NF is marked for throttle
+#ifdef DROP_PKTS_ONLY_AT_BEGGINING
+                if ((flow_entry->sc->highest_downstream_nf_index_id) && (meta->chain_index == 1)) {
+#else
+                if ((flow_entry->sc->highest_downstream_nf_index_id) && (is_upstream_NF(flow_entry->sc->highest_downstream_nf_index_id, meta->chain_index))) {
+#endif //DROP_PKTS_ONLY_AT_BEGGINING
+                        onvm_pkt_drop(pkt);
+                        nf->stats.bkpr_drop+=1;
+                        return;
+                }
+#endif //NF_BACKPRESSURE_APPROACH_1
+        }
+        // End NFVNice
 
         nf_buf = &tx_mgr->nf_rx_bufs[dst_instance_id];
         nf_buf->buffer[nf_buf->count++] = pkt;

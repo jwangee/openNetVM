@@ -506,3 +506,157 @@ onvm_nf_init_rings(struct onvm_nf *nf) {
         if (nf->msg_q == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot create msg queue for NF %u\n", instance_id);
 }
+
+// NFVNice functions
+/*
+// Each entry tells whether a service chain is considered as the bottleneck.
+typedef struct sc_entries {
+        struct onvm_service_chain *sc;
+        uint16_t sc_count;
+        uint16_t bneck_flag;
+}sc_entries_list;
+*/
+static sc_entries_list sc_list[SDN_FT_ENTRIES];
+//bottlenec_nf_info_t bottleneck_nf_list;
+
+int
+onvm_mark_all_entries_for_bottleneck(uint16_t nf_id) {
+        int ret = 0;
+        uint32_t ttl_chains = extract_sc_list(NULL, sc_list);
+
+        //There must be valid chains
+        if(ttl_chains) {
+                uint32_t s_inx = 0;
+                for(s_inx=0; s_inx <SDN_FT_ENTRIES; s_inx++) {
+                        if(sc_list[s_inx].sc) {
+                                int i =0;
+                                for(i=1;i<=sc_list[s_inx].sc->chain_length;++i) {
+                                        if(nf_id == sc_list[s_inx].sc->nf_instance_id[i]) {
+                                                //mark this sc with this index;;
+                                                if(!(TEST_BIT(sc_list[s_inx].sc->highest_downstream_nf_index_id, i))) {
+                                                        SET_BIT(sc_list[s_inx].sc->highest_downstream_nf_index_id, i);
+                                                        break;
+                                                }
+                                        }
+                                }
+                                #ifdef NF_BACKPRESSURE_APPROACH_2
+                                uint32_t index = (i-1);
+                                //for(; index < meta->chain_index; index++ ) {
+                                for(; index >=1 ; index-- ) {
+                                        nfs[sc_list[s_inx].sc->nf_instance_id[index]].throttle_this_upstream_nf=1;
+                                }
+                                #endif  //NF_BACKPRESSURE_APPROACH_2
+
+                        }
+                        else {
+                                break;  //reached end of schains list;
+                        }
+                }
+        }
+        return ret;
+}
+
+int
+onvm_clear_all_entries_for_bottleneck(uint16_t nf_id) {
+        int ret = 0;
+        uint32_t bneck_chains = 0;
+        uint32_t ttl_chains = extract_sc_list(&bneck_chains, sc_list);
+
+        //There must be chains with bottleneck indications
+        if(ttl_chains && bneck_chains) {
+                uint32_t s_inx = 0;
+                for(s_inx=0; s_inx < SDN_FT_ENTRIES; s_inx++) {
+                        if(NULL == sc_list[s_inx].sc) break;    //reached end of chains list
+                        if(sc_list[s_inx].bneck_flag) {
+                                int i =0;
+                                for(i=1;i<=sc_list[s_inx].sc->chain_length;++i) {
+                                        if(nf_id == sc_list[s_inx].sc->nf_instance_id[i]) {
+                                                //clear this sc with this index;;
+                                                if((TEST_BIT(sc_list[s_inx].sc->highest_downstream_nf_index_id, i))) {
+                                                        CLEAR_BIT(sc_list[s_inx].sc->highest_downstream_nf_index_id, i);
+                                                        //break;
+                                                }
+                                        }
+                                }
+
+                                #ifdef NF_BACKPRESSURE_APPROACH_2
+                                // detect the start nf_index based on new val of highest_downstream_nf_index_id
+                                int nf_index=(sc_list[s_inx].sc->highest_downstream_nf_index_id == 0)? (1): (get_index_of_highest_set_bit(sc_list[s_inx].sc->highest_downstream_nf_index_id));
+                                for(; nf_index < i; nf_index++) {
+                                       nfs[sc_list[s_inx].sc->nf_instance_id[nf_index]].throttle_this_upstream_nf=0;
+                                }
+                                #endif  //NF_BACKPRESSURE_APPROACH_2
+                        }
+                }
+        }
+
+        return ret;
+}
+
+int enqueu_nf_to_bottleneck_watch_list(uint16_t nf_id) {
+        if(bottleneck_nf_list.nf[nf_id].enqueue_status) return 1;
+
+        bottleneck_nf_list.nf[nf_id].enqueue_status = BOTTLENECK_NF_STATUS_WAIT_ENQUEUED;
+        bottleneck_nf_list.nf[nf_id].nf_id = nf_id;
+        get_current_time(&bottleneck_nf_list.nf[nf_id].s_time);
+        bottleneck_nf_list.nf[nf_id].enqueued_ctr+=1;
+        bottleneck_nf_list.entires++;
+        return 0;
+}
+
+int dequeue_nf_from_bottleneck_watch_list(uint16_t nf_id) {
+        if(!bottleneck_nf_list.nf[nf_id].enqueue_status) return 1;
+
+        bottleneck_nf_list.nf[nf_id].enqueue_status = BOTTLENECK_NF_STATUS_RESET;
+        bottleneck_nf_list.nf[nf_id].nf_id = nf_id;
+        get_current_time(&bottleneck_nf_list.nf[nf_id].s_time);
+        bottleneck_nf_list.entires--;
+        return 0;
+}
+
+int check_and_enqueue_or_dequeue_nfs_from_bottleneck_watch_list(void) {
+        dump_sdn_ft();
+
+        int ret = 0;
+        uint16_t nf_id = 0;
+        struct timespec now;
+        get_current_time(&now);
+        for(; nf_id < MAX_NFS; nf_id++) {
+
+                if(BOTTLENECK_NF_STATUS_RESET == bottleneck_nf_list.nf[nf_id].enqueue_status) continue;
+                //is in enqueue list and marked
+                else if (BOTTLENECK_NF_STATUS_DROP_MARKED & bottleneck_nf_list.nf[nf_id].enqueue_status) {
+                        if(rte_ring_count(nfs[nf_id].rx_q) < CLIENT_QUEUE_RING_LOW_WATER_MARK_SIZE) {
+                                onvm_clear_all_entries_for_bottleneck(nf_id);
+                                dequeue_nf_from_bottleneck_watch_list(nf_id);
+                                bottleneck_nf_list.nf[nf_id].enqueue_status = BOTTLENECK_NF_STATUS_RESET;
+                                nfs[nf_id].is_bottleneck = 0;
+                        }
+                        //else keep as marked.
+                }
+                //is in enqueue list but not marked
+                else if(BOTTLENECK_NF_STATUS_WAIT_ENQUEUED & bottleneck_nf_list.nf[nf_id].enqueue_status) {
+                        //ring count is still beyond the water mark threshold
+                        if(rte_ring_count(nfs[nf_id].rx_q) >= CLIENT_QUEUE_RING_WATER_MARK_SIZE) {
+                                if((0 == WAIT_TIME_BEFORE_MARKING_OVERFLOW_IN_US)||((WAIT_TIME_BEFORE_MARKING_OVERFLOW_IN_US) + 1 <= get_difftime_us(&bottleneck_nf_list.nf[nf_id].s_time, &now))) {
+                                        bottleneck_nf_list.nf[nf_id].enqueue_status = BOTTLENECK_NF_STATUS_DROP_MARKED;
+                                        onvm_mark_all_entries_for_bottleneck(nf_id);
+                                        bottleneck_nf_list.nf[nf_id].marked_ctr+=1;
+                                        nfs[nf_id].stats.bkpr_count++;
+                                }
+                                //else //time has not expired.. continue to monitor..
+                        }
+                        //ring count has dropped
+                        else  if(rte_ring_count(nfs[nf_id].rx_q) < CLIENT_QUEUE_RING_LOW_WATER_MARK_SIZE) {
+                                if((0 == WAIT_TIME_BEFORE_MARKING_OVERFLOW_IN_US)||((WAIT_TIME_BEFORE_MARKING_OVERFLOW_IN_US) + 1 <= get_difftime_us(&bottleneck_nf_list.nf[nf_id].s_time, &now))) {
+                                        dequeue_nf_from_bottleneck_watch_list(nf_id);
+                                        bottleneck_nf_list.nf[nf_id].enqueue_status = BOTTLENECK_NF_STATUS_RESET;
+                                        nfs[nf_id].is_bottleneck = 0;
+                                }
+                                //else //time has not expired.. continue to monitor..
+                        }
+                }
+
+        }
+        return ret;
+}

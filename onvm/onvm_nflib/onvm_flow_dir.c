@@ -50,7 +50,6 @@
 #include "onvm_flow_table.h"
 
 #define NO_FLAGS 0
-#define SDN_FT_ENTRIES 1024
 
 struct onvm_ft *sdn_ft;
 struct onvm_ft **sdn_ft_p;
@@ -182,4 +181,88 @@ onvm_flow_dir_del_and_free_key(struct onvm_ft_ipv4_5tuple *key) {
         }
 
         return ret;
+}
+
+// NFVNice functions
+static inline uint32_t get_index_of_sc(struct onvm_service_chain *sc, sc_entries_list *c_list) {
+        uint32_t free_index = SDN_FT_ENTRIES;
+        uint32_t i = 0;
+        for (i=0; i<SDN_FT_ENTRIES; i++) {
+                if (c_list[i].sc) {
+                        if(c_list[i].sc == sc) {
+                                return i;
+                        }
+                }
+                else {
+                        free_index = ((i < free_index)? (i):(free_index));
+                }
+        }
+        return free_index;
+}
+
+uint32_t dump_sdn_ft(void) {
+    uint32_t cnt_flow_entries = 0;
+    uint32_t cnt_valid_flow_entries = 0;
+    int32_t tbl_index = 0;
+    for (; tbl_index < SDN_FT_ENTRIES; tbl_index++) {
+        struct onvm_flow_entry *flow_entry = (struct onvm_flow_entry *)&sdn_ft->data[tbl_index*sdn_ft->entry_size];
+        if (flow_entry && flow_entry->sc) {
+            ++cnt_flow_entries;
+            if (flow_entry->sc->chain_length) {
+                ++cnt_valid_flow_entries;
+                //fprintf(stdout, "chain len: %d, highest down: %d\n", flow_entry->sc->chain_length, flow_entry->sc->highest_downstream_nf_index_id);
+            }
+        }
+    }
+
+    //fprintf(stdout, "sdn_ft: %d entries, %d valid entries\n", cnt_flow_entries, cnt_valid_flow_entries);
+    return cnt_flow_entries;
+}
+
+uint32_t
+extract_sc_list(uint32_t *bft_count, sc_entries_list *c_list) {
+        uint32_t active_fts = 0, bneck_fts=0;
+        if(!c_list) return -1;
+        if(sdn_ft) {
+                int32_t tbl_index = 0;
+                uint32_t s_inx = SDN_FT_ENTRIES;
+
+                memset(c_list,0,sizeof(*c_list));
+
+                for (; tbl_index < SDN_FT_ENTRIES; tbl_index++) {
+                        s_inx = SDN_FT_ENTRIES;
+                        struct onvm_flow_entry *flow_entry = (struct onvm_flow_entry *)&sdn_ft->data[tbl_index*sdn_ft->entry_size];
+                        if (flow_entry && flow_entry->sc && flow_entry->sc->chain_length) {
+                                active_fts+=1;
+                                s_inx = get_index_of_sc(flow_entry->sc, c_list);
+                                if(s_inx < SDN_FT_ENTRIES) {
+                                        c_list[s_inx].sc = flow_entry->sc;
+                                        c_list[s_inx].sc_count+=1;
+                                        if(1 == c_list[s_inx].sc_count) c_list[s_inx].bneck_flag=0;
+                                }
+                        }
+                        else continue;
+
+                        #ifdef ENABLE_NF_BACKPRESSURE
+                        if (flow_entry->sc->highest_downstream_nf_index_id) {
+                                bneck_fts++;
+                                if(s_inx < SDN_FT_ENTRIES) {
+                                        c_list[s_inx].bneck_flag+=1;
+                                }
+                                #define LIST_FLOW_ENTRIES
+                                #ifdef LIST_FLOW_ENTRIES
+                                int i =0;
+                                fprintf(stdout, "OverflowStatus [(binx=%d, %d),(nfid=%d),(scl=%d)::", flow_entry->sc->highest_downstream_nf_index_id, flow_entry->idle_timeout, flow_entry->sc->ref_cnt, flow_entry->sc->chain_length );
+                                for(i=1;i<=flow_entry->sc->chain_length;++i)printf("[%d], ",flow_entry->sc->sc[i].destination);
+                                if(flow_entry->key)
+                                        fprintf(stdout, "Tuple:[SRC(%d:%d),DST(%d:%d), PROTO(%d)], \t", flow_entry->key->src_addr, rte_be_to_cpu_16(flow_entry->key->src_port), flow_entry->key->dst_addr, rte_be_to_cpu_16(flow_entry->key->dst_port), flow_entry->key->proto);
+                                fprintf(stdout, "\n");
+                                #endif
+                        }
+                        #endif  //ENABLE_NF_BACKPRESSURE
+                }
+        }
+        if(bft_count)*bft_count = bneck_fts;
+
+        return active_fts;
 }

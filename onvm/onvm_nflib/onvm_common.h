@@ -47,6 +47,7 @@
 /* Std C library includes for shared core */
 #include <sys/shm.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <sys/ipc.h>
 #include <semaphore.h>
 #include <fcntl.h>
@@ -58,6 +59,129 @@
 
 #include "onvm_config_common.h"
 #include "onvm_msg_common.h"
+
+/**********************************NFVNice************************************/
+#ifndef ENABLE_NF_BACKPRESSURE
+#define ENABLE_NF_BACKPRESSURE
+#endif
+
+#ifndef NF_BACKPRESSURE_APPROACH_1
+//#define NF_BACKPRESSURE_APPROACH_1
+#endif
+
+#ifndef DROP_PKTS_ONLY_AT_BEGGINING
+#define DROP_PKTS_ONLY_AT_BEGGINING
+#endif
+
+#ifndef HOP_BY_HOP_BACKPRESSURE
+//#define HOP_BY_HOP_BACKPRESSURE
+#endif
+
+#ifndef NF_BACKPRESSURE_APPROACH_2
+#define NF_BACKPRESSURE_APPROACH_2
+#endif
+
+#ifndef USE_BKPR_V2_IN_TIMER_MODE
+#define USE_BKPR_V2_IN_TIMER_MODE
+#endif
+
+#define SET_BIT(x,bitNum) ((x)|=(1<<(bitNum-1)))
+static inline void set_bit(long *x, unsigned bitNum) {
+    *x |= (1L << (bitNum-1));
+}
+
+#define CLEAR_BIT(x,bitNum) ((x) &= ~(1<<(bitNum-1)))
+static inline void clear_bit(long *x, unsigned bitNum) {
+    *x &= (~(1L << (bitNum-1)));
+}
+
+#define TOGGLE_BIT(x,bitNum) ((x) ^= (1<<(bitNum-1)))
+static inline void toggle_bit(long *x, unsigned bitNum) {
+    *x ^= (1L << (bitNum-1));
+}
+#define TEST_BIT(x,bitNum) ((x) & (1<<(bitNum-1)))
+static inline long test_bit(long x, unsigned bitNum) {
+    return (x & (1L << (bitNum-1)));
+}
+
+//1 => NF component at chain_index is an upstream component w.r.t where the bottleneck is seen in the chain (do not drop/throttle)
+//0 => NF component at chain_index is an downstream component w.r.t where the bottleneck is seen in the chain (so drop/throttle)
+static inline long is_upstream_NF(long chain_throttle_value, long chain_index) {
+#ifndef HOP_BY_HOP_BACKPRESSURE
+        long chain_index_value = 0;
+        SET_BIT(chain_index_value, chain_index);
+        CLEAR_BIT(chain_throttle_value, chain_index);
+        return ((chain_throttle_value > chain_index_value)? (1):(0) );
+#else
+        long chain_index_value = 0;
+        SET_BIT(chain_index_value, (chain_index+1));
+        return ((chain_throttle_value & chain_index_value));
+        //return is_immediate_upstream_NF(chain_throttle_value,chain_index);
+#endif //HOP_BY_HOP_BACKPRESSURE
+}
+
+static inline long get_index_of_highest_set_bit(long x) {
+        long next_set_index = 0;
+        //SET_BIT(chain_index_value, chain_index);
+        //while ((1<<(next_set_index++)) < x);
+        //for(; (x > (1<<next_set_index));next_set_index++)
+        for(; (x >= (1<<next_set_index));next_set_index++);
+        return next_set_index;
+}
+
+// wakeup thread related
+#define WAIT_TIME_BEFORE_MARKING_OVERFLOW_IN_US   (0*SECOND_TO_MICRO_SECOND)
+
+#define BOTTLENECK_NF_STATUS_WAIT_ENQUEUED   (0x01)
+#define BOTTLENECK_NF_STATUS_DROP_MARKED     (0x02)
+#define BOTTLENECK_NF_STATUS_RESET           (0x00)
+
+typedef struct sc_entries {
+        struct onvm_service_chain *sc;
+        uint16_t sc_count;
+        uint16_t bneck_flag;
+}sc_entries_list;
+
+typedef struct bottleneck_nf_entries {
+        struct timespec s_time;
+        uint16_t enqueue_status; // whether this nf is being watched
+        uint16_t nf_id;
+        uint16_t enqueued_ctr;
+        uint16_t marked_ctr;
+}bottleneck_nf_entries_t;
+
+typedef struct bottlenec_nf_info {
+        uint16_t entires;
+        bottleneck_nf_entries_t nf[128];
+}bottlenec_nf_info_t;
+
+bottlenec_nf_info_t bottleneck_nf_list;
+
+// Normal timers
+#define SECOND_TO_MICRO_SECOND          (1000*1000)
+#define NANO_SECOND_TO_MICRO_SECOND(x)  (double)((x)/(1000))
+#define MICRO_SECOND_TO_SECOND(x)       (double)((x)/(SECOND_TO_MICRO_SECOND))
+#define USE_THIS_CLOCK  CLOCK_MONOTONIC
+
+static inline int get_current_time(struct timespec *pTime);
+static inline unsigned long get_difftime_us(struct timespec *start, struct timespec *end);
+
+static inline int get_current_time(struct timespec *pTime) {
+        if (clock_gettime(USE_THIS_CLOCK, pTime) == -1) {
+              perror("\n clock_gettime");
+              return 1;
+        }
+        return 0;
+}
+
+static inline unsigned long get_difftime_us(struct timespec *pStart, struct timespec *pEnd) {
+        unsigned long delta = ( ((pEnd->tv_sec - pStart->tv_sec) * SECOND_TO_MICRO_SECOND) +
+                     ((pEnd->tv_nsec - pStart->tv_nsec) /1000) );
+        //printf("Delta [%ld], sec:[%ld]: nanosec [%ld]", delta, (pEnd->tv_sec - pStart->tv_sec), (pEnd->tv_nsec - pStart->tv_nsec));
+        return delta;
+}
+
+/********************************OpenNetVM************************************/
 
 #define ONVM_NF_HANDLE_TX 1                   // should be true if NFs primarily pass packets to each other
 #define ONVM_NF_SHUTDOWN_CORE_REASSIGNMENT 0  // should be true if on NF shutdown onvm_mgr tries to reallocate cores
@@ -312,6 +436,11 @@ struct onvm_nf {
                 volatile uint64_t act_drop;
                 volatile uint64_t act_next;
                 volatile uint64_t act_buffer;
+
+                // NFVNice
+                volatile uint16_t max_rx_q_len;
+                volatile uint16_t max_tx_q_len;
+                volatile uint16_t bkpr_count;
         } stats;
 
         struct {
@@ -324,6 +453,13 @@ struct onvm_nf {
                 /* Mutex for NF sem_wait */
                 sem_t *nf_mutex;
         } shared_core;
+
+        // NFVNice
+        //status: not marked=0/marked for enqueue=1/enqueued as bottleneck=2
+        uint16_t is_bottleneck;
+        // rename downstream_nf_overflow to throttle_this_upstream_nf;
+        uint8_t throttle_this_upstream_nf;
+        uint64_t throttle_count;
 };
 
 /*
@@ -354,6 +490,11 @@ struct onvm_service_chain {
         struct onvm_service_chain_entry sc[ONVM_MAX_CHAIN_LENGTH];
         uint8_t chain_length;
         int ref_cnt;
+
+        // NFVNice related
+        volatile uint8_t highest_downstream_nf_index_id;
+        uint8_t nf_instances_mapped;
+        uint8_t nf_instance_id[ONVM_MAX_CHAIN_LENGTH+1];
 };
 
 struct lpm_request {
@@ -482,10 +623,27 @@ get_sem_name(unsigned id) {
         return buffer;
 }
 
+/***********************Internal Functions************************************/
+/*
+ * Return status:
+ *                  0: wakeup signal not required
+ *                  1: wakeup signal is required
+ *                 -1: issue forced block/goto_sleep signal
+ */
 static inline int
 whether_wakeup_client(struct onvm_nf *nf, struct nf_wakeup_info *nf_wakeup_info) {
         if (rte_ring_count(nf->rx_q) < PKT_WAKEUP_THRESHOLD && rte_ring_count(nf->msg_q) < MSG_WAKEUP_THRESHOLD)
                 return 0;
+
+#ifdef ENABLE_NF_BACKPRESSURE
+#ifdef NF_BACKPRESSURE_APPROACH_2
+        //service chain case
+        if (nf->throttle_this_upstream_nf) {
+                nf->throttle_count++;
+                return -1;
+        }
+#endif //NF_BACKPRESSURE_APPROACH_2
+#endif //ENABLE_NF_BACKPRESSURE
 
         /* Check if its already woken up */
         if (rte_atomic16_read(nf_wakeup_info->shm_server) == 0)

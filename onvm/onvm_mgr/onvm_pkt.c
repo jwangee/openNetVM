@@ -131,3 +131,129 @@ onvm_pkt_drop_batch(struct rte_mbuf **pkts, uint16_t size) {
         for (i = 0; i < size; i++)
                 rte_pktmbuf_free(pkts[i]);
 }
+
+// NFVNice functions
+void onvm_detect_and_set_back_pressure_v2(struct onvm_nf *cl) {
+        if(!cl || cl->is_bottleneck) return ;
+        cl->is_bottleneck = 1;
+        enqueu_nf_to_bottleneck_watch_list(cl->instance_id);
+}
+
+void
+onvm_detect_and_set_back_pressure(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl) {
+        /*** Make sure this function is called only on error status on rx_enqueue() ***/
+        /*** Detect the NF Rx Buffer overflow and signal this NF instance in the service chain as bottlenecked -- source of back-pressure -- all NFs prior to this in chain must throttle (either not scheduler or drop packets). ***/
+
+#ifdef ENABLE_NF_BACKPRESSURE
+        struct onvm_pkt_meta *meta = NULL;
+        uint16_t i;
+        struct onvm_flow_entry *flow_entry = NULL;
+        //unsigned rx_q_count = rte_ring_count(cl->rx_q);
+
+        unsigned rx_q_count = rte_ring_count(cl->rx_q);
+        cl->stats.max_rx_q_len =  (rx_q_count>cl->stats.max_rx_q_len)?(rx_q_count):(cl->stats.max_rx_q_len);
+        unsigned tx_q_count = rte_ring_count(cl->tx_q);
+        cl->stats.max_tx_q_len =  (tx_q_count>cl->stats.max_tx_q_len)?(tx_q_count):(cl->stats.max_tx_q_len);
+
+        //Inside this function indicates NFs Rx buffer has exceeded water-mark
+
+        /** Flow Entry based/Per Service Chain classification scenario **/
+
+        for(i = 0; i < count; i++) {
+                int ret = get_flow_entry(pkts[i], &flow_entry);
+                if (ret < 0)
+                    continue;
+
+                if (flow_entry && flow_entry->sc) {
+                        meta = onvm_get_pkt_meta(pkts[i]);
+                        // Enable below line to skip the 1st NF in the chain Note: <=1 => skip Flow_rule_installer and the First NF in the chain; <1 => skip only the Flow_rule_installer NF
+                        if(meta->chain_index < 1) continue;
+
+                        //Check the Flow Entry mark status and Add mark if not already done!
+                        if(!(TEST_BIT(flow_entry->sc->highest_downstream_nf_index_id, meta->chain_index))) {
+                                SET_BIT(flow_entry->sc->highest_downstream_nf_index_id, meta->chain_index);
+
+                                #ifdef NF_BACKPRESSURE_APPROACH_2
+                                uint8_t index = 1;
+                                //for(; index < meta->chain_index; index++ ) {
+                                for(index=(meta->chain_index -1); index >=1 ; index-- ) {
+                                        nfs[flow_entry->sc->nf_instance_id[index]].throttle_this_upstream_nf=1;
+                                        #ifdef HOP_BY_HOP_BACKPRESSURE
+                                        break;
+                                        #endif //HOP_BY_HOP_BACKPRESSURE
+                                }
+                                #endif  //NF_BACKPRESSURE_APPROACH_2
+                                //approach: extend the service chain to keep track of client_nf_ids that service the chain, in-order to know which NFs to throttle in the wakeup thread..?
+                                //Test and Set
+
+                                //reset flow_entry and meta
+                                flow_entry = NULL;
+                                meta = NULL;
+                        }
+                }
+        }
+
+        cl->stats.bkpr_count++;
+#endif //ENABLE_NF_BACKPRESSURE
+        return;
+}
+
+void
+onvm_check_and_reset_back_pressure_v2(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl) {
+
+#ifdef ENABLE_NF_BACKPRESSURE
+        unsigned rx_q_count = rte_ring_count(cl->rx_q);
+        // check if rx_q_size has decreased to acceptable level
+        if (rx_q_count >= CLIENT_QUEUE_RING_LOW_WATER_MARK_SIZE) {
+                if(rx_q_count >=CLIENT_QUEUE_RING_WATER_MARK_SIZE) {
+                        onvm_detect_and_set_back_pressure_v2(cl);
+                }
+                return;
+        }
+#endif //ENABLE_NF_BACKPRESSURE
+        return;
+}
+
+void
+onvm_check_and_reset_back_pressure(struct rte_mbuf *pkts[], uint16_t count, struct onvm_nf *cl) {
+
+#ifdef ENABLE_NF_BACKPRESSURE
+        struct onvm_pkt_meta *meta = NULL;
+        struct onvm_flow_entry *flow_entry = NULL;
+        uint16_t i;
+        unsigned rx_q_count = rte_ring_count(cl->rx_q);
+
+        // check if rx_q_size has decreased to acceptable level
+        if (rx_q_count >= CLIENT_QUEUE_RING_LOW_WATER_MARK_SIZE) {
+                if(rx_q_count >=CLIENT_QUEUE_RING_WATER_MARK_SIZE) {
+                        onvm_detect_and_set_back_pressure(pkts,count,cl);
+                }
+                return;
+        }
+
+        //Inside here indicates NFs Rx buffer has resumed to acceptable level (watermark - hysterisis)
+
+        for(i = 0; i < count; i++) {
+                int ret = get_flow_entry(pkts[i], &flow_entry);
+                if (ret >= 0 && flow_entry && flow_entry->sc) {
+                        if(flow_entry->sc->highest_downstream_nf_index_id ) {
+                                meta = onvm_get_pkt_meta(pkts[i]);
+                                if(TEST_BIT(flow_entry->sc->highest_downstream_nf_index_id, meta->chain_index )) {
+                                        // also reset the chain's downstream NFs cl->downstream_nf_overflow and cl->highest_downstream_nf_index_id=0. But How?? <track the nf_instance_id in the service chain.
+                                        CLEAR_BIT(flow_entry->sc->highest_downstream_nf_index_id, meta->chain_index);
+
+#ifdef NF_BACKPRESSURE_APPROACH_2
+                                        // detect the start nf_index based on new val of highest_downstream_nf_index_id
+                                        unsigned nf_index=(flow_entry->sc->highest_downstream_nf_index_id == 0)? (1): (get_index_of_highest_set_bit(flow_entry->sc->highest_downstream_nf_index_id));
+                                        for(; nf_index < meta->chain_index; nf_index++) {
+                                                nfs[flow_entry->sc->nf_instance_id[nf_index]].throttle_this_upstream_nf=0;
+                                        }
+#endif //NF_BACKPRESSURE_APPROACH_2
+                                }
+                        }
+                        flow_entry = NULL;
+                        meta = NULL;
+                }
+        }
+#endif //ENABLE_NF_BACKPRESSURE
+}

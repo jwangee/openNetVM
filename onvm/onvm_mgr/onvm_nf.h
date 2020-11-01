@@ -82,4 +82,15 @@ onvm_nf_check_status(void);
 int
 onvm_nf_send_msg(uint16_t dest, uint8_t msg_type, void *msg_data);
 
+// NFVNice functions
+int onvm_mark_all_entries_for_bottleneck(uint16_t nf_id);
+
+int onvm_clear_all_entries_for_bottleneck(uint16_t nf_id);
+
+int enqueu_nf_to_bottleneck_watch_list(uint16_t nf_id);
+
+int dequeue_nf_from_bottleneck_watch_list(uint16_t nf_id);
+
+int check_and_enqueue_or_dequeue_nfs_from_bottleneck_watch_list(void);
+
 #endif  // _ONVM_NF_H_

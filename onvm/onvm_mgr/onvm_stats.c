@@ -491,6 +491,7 @@ onvm_stats_display_nfs(unsigned difftime, uint8_t verbosity_level) {
                         act_returned_for_service[nfs[i].service_id] += act_returned;
                 }
 
+                fprintf(stats_out, "/is_bt  %-2u /is_th  %-2u /cnt_t  %-2lu /cnt_b  %-2u /\n", nfs[i].is_bottleneck, nfs[i].throttle_this_upstream_nf, nfs[i].throttle_count, nfs[i].stats.bkpr_count);
                 if (verbosity_level == ONVM_RAW_STATS_DUMP) {
                         fprintf(stats_out, ONVM_STATS_RAW_DUMP_CONTENT,
                                 buffer, nfs[i].tag, nfs[i].instance_id, nfs[i].service_id, nfs[i].thread_info.core,

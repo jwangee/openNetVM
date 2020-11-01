@@ -78,6 +78,7 @@ master_thread_main(void) {
         uint16_t i;
         int shutdown_iter_count;
         const unsigned sleeptime = global_stats_sleep_time;
+        //const unsigned sleeptime = 3;
         const unsigned verbosity_level = global_verbosity_level;
         const uint32_t time_to_live = global_time_to_live;
         const uint32_t pkt_limit = global_pkt_limit;
@@ -239,6 +240,14 @@ tx_thread_main(void *arg) {
 
                         /* Now process the Client packets read */
                         if (likely(tx_count > 0)) {
+                                // NFVNice: check back-pressure before sending
+#ifdef ENABLE_NF_BACKPRESSURE
+#ifdef USE_BKPR_V2_IN_TIMER_MODE
+                                onvm_check_and_reset_back_pressure_v2(pkts, tx_count, nf);
+#else
+                                onvm_check_and_reset_back_pressure(pkts, tx_count, nf);
+#endif //USE_BKPR_V2_IN_TIMER_MODE
+#endif // ENABLE_NF_BACKPRESSURE
                                 onvm_pkt_process_tx_batch(tx_mgr, pkts, tx_count, nf);
                         }
                 }
@@ -284,6 +293,8 @@ wakeup_thread_main(void *arg) {
         }
 
         for (; worker_keep_running;) {
+                check_and_enqueue_or_dequeue_nfs_from_bottleneck_watch_list();
+
                 for (i = wakeup_ctx->first_nf; i < wakeup_ctx->last_nf; i++) {
                         nf = &nfs[i];
                         nf_wakeup_info = &nf_wakeup_infos[i];
@@ -291,8 +302,20 @@ wakeup_thread_main(void *arg) {
                                 continue;
 
                         /* Check if NF is sleeping and has pkts on the rx queue  */
-                        if (!whether_wakeup_client(nf, nf_wakeup_info))
+                        int ret = whether_wakeup_client(nf, nf_wakeup_info);
+                        if (0 == ret) {
+                            continue;
+                        }
+
+#ifdef ENABLE_NF_BACKPRESSURE
+#ifdef NF_BACKPRESSURE_APPROACH_2
+                        if (-1 == ret) {
+                                /* Make sure to set the flag here and check for flag in nf_lib and block */
+                                rte_atomic16_set(nf_wakeup_info->shm_server, 1);
                                 continue;
+                        }
+#endif //NF_BACKPRESSURE_APPROACH_2
+#endif //ENABLE_NF_BACKPRESSURE
 
                         wakeup_client(nf_wakeup_info);
                 }

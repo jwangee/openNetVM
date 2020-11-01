@@ -44,6 +44,8 @@
 #include "onvm_common.h"
 #include "onvm_flow_table.h"
 
+#define SDN_FT_ENTRIES 1024
+
 extern struct onvm_ft* sdn_ft;
 extern struct onvm_ft** sdn_ft_p;
 
@@ -85,4 +87,29 @@ int
 onvm_flow_dir_del_key(struct onvm_ft_ipv4_5tuple* key);
 int
 onvm_flow_dir_del_and_free_key(struct onvm_ft_ipv4_5tuple* key);
+
+// NFVNice functions
+uint32_t
+extract_sc_list(uint32_t *bft_count, sc_entries_list *c_list);
+
+uint32_t
+dump_sdn_ft(void);
+
+// NFVNice functions
+#define USE_KEY_MODE_FOR_FLOW_ENTRY       //Note: Enabling this flag is costing upto 4Mpps (reason: softrss() call)
+static inline int get_flow_entry( struct rte_mbuf *pkt, struct onvm_flow_entry **flow_entry) {
+        int ret = -1;
+        if(flow_entry)*flow_entry = NULL;
+#ifdef USE_KEY_MODE_FOR_FLOW_ENTRY
+        struct onvm_ft_ipv4_5tuple fk;
+        if ((ret = onvm_ft_fill_key(&fk, pkt))) {
+                return ret;
+        }
+        ret = onvm_flow_dir_get_key(&fk, flow_entry);
+#else  // #elif defined (USE_KEY_MODE_FOR_FLOW_ENTRY)
+        ret = onvm_flow_dir_get_pkt(pkt, flow_entry);
+#endif
+        return ret;
+}
+
 #endif  // _ONVM_FLOW_DIR_H_

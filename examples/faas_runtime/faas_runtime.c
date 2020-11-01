@@ -1,5 +1,6 @@
 
 #include <unistd.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <libgen.h>
@@ -42,6 +43,10 @@
 
 static int nf_idx = 0;
 static int faas_tcp_port = 0;
+static int faas_chain_length = 1;
+bool is_ingress = false;
+bool is_egress = false;
+int faas_per_packet_cycle = 0;
 int bypass_per_packet_cycle = 100;
 
 // destination specifies the next NF instance
@@ -89,13 +94,31 @@ static int
 parse_app_args(int argc, char *argv[], const char *progname) {
         int c, dst_flag = 0, rules_init = 1;
 
-        while ((c = getopt(argc, argv, "t:i:d:f:p:b")) != -1) {
+        while ((c = getopt(argc, argv, "t:n:i:l:e:c:d:f:p:b")) != -1) {
                 switch (c) {
                         case 't':
                                 faas_tcp_port = strtoul(optarg, NULL, 10);
                                 break;
-                        case 'i':
+                        case 'n':
                                 nf_idx = strtoul(optarg, NULL, 10);
+                                break;
+                        case 'i':
+                                if (strtoul(optarg, NULL, 10) > 0)
+                                    is_ingress = true;
+                                else
+                                    is_ingress = false;
+                                break;
+                        case 'l':
+                                faas_chain_length = strtoul(optarg, NULL, 10);
+                                break;
+                        case 'e':
+                                if (strtoul(optarg, NULL, 10) > 0)
+                                    is_egress = true;
+                                else
+                                    is_egress = false;
+                                break;
+                        case 'c':
+                                faas_per_packet_cycle = strtoul(optarg, NULL, 10);
                                 break;
                         case 'd':
                                 destination = strtoul(optarg, NULL, 10);
@@ -205,7 +228,8 @@ bypass_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         meta->destination = destination;
         stats.pkt_accept++;
         if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
-        faas_handle_egress(pkt, meta);
+        
+        if (is_egress) faas_handle_egress(pkt, meta);
         return 0;
 }
 
@@ -262,7 +286,8 @@ chacha_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         meta->destination = destination;
         stats.pkt_accept++;
         if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
-        faas_handle_egress(pkt, meta);
+
+        if (is_egress) faas_handle_egress(pkt, meta);
         return 0;
 }
 
@@ -319,6 +344,7 @@ acl_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
                         break;
         }
 
+        if (is_egress) faas_handle_egress(pkt, meta);
         return 0;
 }
 
@@ -426,6 +452,8 @@ l4nat_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
     meta->action = ONVM_NF_ACTION_TONF;
     meta->destination = destination;
     stats.pkt_accept++;
+
+    if (is_egress) faas_handle_egress(pkt, meta);
     return 0;
 }
 
@@ -487,6 +515,9 @@ int main(int argc, char *argv[]) {
         printf("NF Index = %d\n", nf_idx);
         switch (nf_idx) {
         case 1:
+            if (faas_per_packet_cycle > 0) {
+                bypass_per_packet_cycle = faas_per_packet_cycle;
+            }
             nf_function_table->pkt_handler = &bypass_packet_handler;
             break;
         case 2:
@@ -515,7 +546,7 @@ int main(int argc, char *argv[]) {
 
         /* Map the sdn_ft table */
         printf("Target traffic = %d\n", faas_tcp_port);
-        if (faas_tcp_port != 0) {
+        if (is_ingress && faas_tcp_port != 0) {
             onvm_flow_dir_nf_init();
 
             struct onvm_flow_entry *flow_entry = NULL;
@@ -527,7 +558,15 @@ int main(int argc, char *argv[]) {
             if (schain == NULL) {
                 rte_exit(EXIT_FAILURE, "Cannot allocate memory for SC Entry\n");
             }
+
             onvm_sc_append_entry(schain, ONVM_NF_ACTION_TONF, curr_service_id);
+            if (faas_chain_length > 1) {
+                // Link other NFs to this service chain.
+                for (int idx = 1; idx < faas_chain_length - 1; ++idx) {
+                    onvm_sc_append_entry(schain, ONVM_NF_ACTION_OUT, curr_service_id + idx);
+                }
+                onvm_sc_append_entry(schain, ONVM_NF_ACTION_OUT, curr_service_id + faas_chain_length - 1);
+            }
 
             ipv4_5tuple.src_addr = get_ipv4_value("10.0.0.1");
             ipv4_5tuple.dst_addr = get_ipv4_value("10.0.0.1");
