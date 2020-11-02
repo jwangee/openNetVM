@@ -442,7 +442,7 @@ struct onvm_nf {
                 volatile uint64_t act_buffer;
 
                 // NFVNice
-                volatile uint16_t bkpr_drop;
+                volatile uint64_t bkpr_drop;
                 volatile uint64_t prev_bkpr_drop;
 
                 volatile uint16_t max_rx_q_len;
