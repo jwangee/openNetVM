@@ -46,6 +46,7 @@
 
 ******************************************************************************/
 
+#include "onvm_flow_table.h"
 #include "onvm_pkt_common.h"
 
 /**********************Internal Functions Prototypes**************************/
@@ -205,14 +206,18 @@ onvm_pkt_enqueue_nf(struct queue_mgr *tx_mgr, uint16_t dst_service_id, struct rt
                 return;
         }
 
-        // NFVNice
+// NFVNice
 #ifdef ENABLE_NF_BACKPRESSURE
         struct onvm_pkt_meta *meta = (struct onvm_pkt_meta*) &(((struct rte_mbuf*)pkt)->udata64);
         struct onvm_flow_entry *flow_entry = NULL;
-        get_flow_entry(pkt, &flow_entry);
-        if(meta ||flow_entry) {
-                ; // do nothing :: to avoid compilation error
+        int ret = get_flow_entry(pkt, &flow_entry);
+        if (ret < 0) {
+            onvm_pkt_drop(pkt);
+            if (source_nf != NULL)
+                        source_nf->stats.tx_drop++;
+                return;
         }
+
         if (meta && flow_entry && flow_entry->sc) {
 
 #if defined(NF_BACKPRESSURE_APPROACH_2) || defined(USE_BKPR_V2_IN_TIMER_MODE)
@@ -234,7 +239,7 @@ onvm_pkt_enqueue_nf(struct queue_mgr *tx_mgr, uint16_t dst_service_id, struct rt
 #endif //NF_BACKPRESSURE_APPROACH_1
         }
 #endif // ENABLE_NF_BACKPRESSURE
-        // End NFVNice
+// End NFVNice
 
         nf_buf = &tx_mgr->nf_rx_bufs[dst_instance_id];
         nf_buf->buffer[nf_buf->count++] = pkt;

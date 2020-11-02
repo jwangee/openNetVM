@@ -551,8 +551,9 @@ int main(int argc, char *argv[]) {
 
         /* Map the sdn_ft table */
         printf("Target traffic = %d\n", faas_tcp_port);
+        onvm_flow_dir_nf_init();
+
         if (is_ingress && faas_tcp_port != 0) {
-            onvm_flow_dir_nf_init();
 
             struct onvm_flow_entry *flow_entry = NULL;
             struct onvm_ft_ipv4_5tuple *fk = NULL;

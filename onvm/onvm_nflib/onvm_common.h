@@ -66,11 +66,11 @@
 #endif
 
 #ifndef ENABLE_NF_BACKPRESSURE
-//#define ENABLE_NF_BACKPRESSURE
+#define ENABLE_NF_BACKPRESSURE
 #endif
 
 #ifndef NF_BACKPRESSURE_APPROACH_1
-//#define NF_BACKPRESSURE_APPROACH_1
+#define NF_BACKPRESSURE_APPROACH_1
 #endif
 
 #ifndef DROP_PKTS_ONLY_AT_BEGGINING
@@ -82,11 +82,11 @@
 #endif
 
 #ifndef NF_BACKPRESSURE_APPROACH_2
-#define NF_BACKPRESSURE_APPROACH_2
+//#define NF_BACKPRESSURE_APPROACH_2
 #endif
 
 #ifndef USE_BKPR_V2_IN_TIMER_MODE
-#define USE_BKPR_V2_IN_TIMER_MODE
+//#define USE_BKPR_V2_IN_TIMER_MODE
 #endif
 
 #define SET_BIT(x,bitNum) ((x)|=(1<<(bitNum-1)))
@@ -442,6 +442,9 @@ struct onvm_nf {
                 volatile uint64_t act_buffer;
 
                 // NFVNice
+                volatile uint16_t bkpr_drop;
+                volatile uint64_t prev_bkpr_drop;
+
                 volatile uint16_t max_rx_q_len;
                 volatile uint16_t max_tx_q_len;
                 volatile uint16_t bkpr_count;

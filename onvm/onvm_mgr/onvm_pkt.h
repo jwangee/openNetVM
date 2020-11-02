@@ -84,10 +84,10 @@ void
 onvm_pkt_drop_batch(struct rte_mbuf **pkts, uint16_t size);
 
 // NFVNice functions
-void onvm_detect_and_set_back_pressure_v2(struct onvm_nf *cl);
+void onvm_detect_and_set_back_pressure_v2(__attribute__((unused)) struct onvm_nf *cl);
 
 void
-onvm_detect_and_set_back_pressure(struct rte_mbuf *pkts[], uint16_t count, struct onvm_nf *cl);
+onvm_detect_and_set_back_pressure(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl);
 
 void
 onvm_check_and_reset_back_pressure_v2(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl);
