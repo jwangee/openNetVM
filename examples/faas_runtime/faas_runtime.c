@@ -212,6 +212,7 @@ void faas_handle_egress(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta) {
 
     meta->action = ONVM_NF_ACTION_OUT;
     meta->destination = 0;
+    if (debug) RTE_LOG(INFO, APP, "egress to port: %d \n", meta->destination);
 }
 
 // Bypass
@@ -227,8 +228,8 @@ bypass_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         meta->action = ONVM_NF_ACTION_TONF;
         meta->destination = destination;
         stats.pkt_accept++;
-        if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
-        
+        if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d. To next: %d\n", bypass_per_packet_cycle, meta->destination);
+
         if (is_egress) faas_handle_egress(pkt, meta);
         return 0;
 }
@@ -285,7 +286,7 @@ chacha_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         meta->action = ONVM_NF_ACTION_TONF;
         meta->destination = destination;
         stats.pkt_accept++;
-        if (debug) RTE_LOG(INFO, APP, "Per-packet bypass %d \n", bypass_per_packet_cycle);
+        if (debug) RTE_LOG(INFO, APP, "CHACHA to next: %d\n", meta->destination);
 
         if (is_egress) faas_handle_egress(pkt, meta);
         return 0;
@@ -519,18 +520,22 @@ int main(int argc, char *argv[]) {
                 bypass_per_packet_cycle = faas_per_packet_cycle;
             }
             nf_function_table->pkt_handler = &bypass_packet_handler;
+            printf("NF = Bypass %d\n", bypass_per_packet_cycle);
             break;
         case 2:
             nf_function_table->pkt_handler = &acl_packet_handler;
+            printf("NF = ACL\n");
             break;
         case 3:
             chacha_module_init();
             nf_function_table->pkt_handler = &chacha_packet_handler;
+            printf("NF = CHACHA\n");
             break;
         case 4:
             onvm_nat_dir_init();
             assert(nat_table != NULL);
             nf_function_table->pkt_handler = &l4nat_packet_handler;
+            printf("NF = L4NAT\n");
             break;
         default:
             nf_function_table->pkt_handler = &bypass_packet_handler;

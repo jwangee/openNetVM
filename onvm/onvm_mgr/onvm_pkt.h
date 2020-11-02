@@ -93,6 +93,6 @@ void
 onvm_check_and_reset_back_pressure_v2(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl);
 
 void
-onvm_check_and_reset_back_pressure(struct rte_mbuf *pkts[], uint16_t count, struct onvm_nf *cl);
+onvm_check_and_reset_back_pressure(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused)) uint16_t count, __attribute__((unused)) struct onvm_nf *cl);
 
 #endif  // _ONVM_PKT_H_

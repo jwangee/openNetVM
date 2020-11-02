@@ -61,8 +61,12 @@
 #include "onvm_msg_common.h"
 
 /**********************************NFVNice************************************/
+#ifndef FAAS_HASH
+#define FAAS_HASH
+#endif
+
 #ifndef ENABLE_NF_BACKPRESSURE
-#define ENABLE_NF_BACKPRESSURE
+//#define ENABLE_NF_BACKPRESSURE
 #endif
 
 #ifndef NF_BACKPRESSURE_APPROACH_1

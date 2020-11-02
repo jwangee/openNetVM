@@ -134,9 +134,13 @@ onvm_pkt_drop_batch(struct rte_mbuf **pkts, uint16_t size) {
 
 // NFVNice functions
 void onvm_detect_and_set_back_pressure_v2(struct onvm_nf *cl) {
+
+#ifdef ENABLE_NF_BACKPRESSURE
         if(!cl || cl->is_bottleneck) return ;
         cl->is_bottleneck = 1;
         enqueu_nf_to_bottleneck_watch_list(cl->instance_id);
+#endif //ENABLE_NF_BACKPRESSURE
+        return;
 }
 
 void
@@ -215,7 +219,7 @@ onvm_check_and_reset_back_pressure_v2(__attribute__((unused)) struct rte_mbuf *p
 }
 
 void
-onvm_check_and_reset_back_pressure(struct rte_mbuf *pkts[], uint16_t count, struct onvm_nf *cl) {
+onvm_check_and_reset_back_pressure(__attribute__((unused)) struct rte_mbuf *pkts[], __attribute__((unused))uint16_t count, __attribute__((unused)) struct onvm_nf *cl) {
 
 #ifdef ENABLE_NF_BACKPRESSURE
         struct onvm_pkt_meta *meta = NULL;
