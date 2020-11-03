@@ -491,8 +491,12 @@ onvm_stats_display_nfs(unsigned difftime, uint8_t verbosity_level) {
                         act_returned_for_service[nfs[i].service_id] += act_returned;
                 }
 
-                fprintf(stats_out, "/btlneck  %-2u /throttle  %-2u /throttle_cnt  %-2lu /bkpr_cnt  %-2u /bp_drop %-9" PRIu64"/\n",
-                        nfs[i].is_bottleneck, nfs[i].throttle_this_upstream_nf, nfs[i].throttle_count, nfs[i].stats.bkpr_count, nfs[i].stats.bkpr_drop);
+                uint32_t comp_cost = 0;
+                if (nfs[i].info != NULL) {
+                    comp_cost = nfs[i].info->comp_cost + 1;
+                }
+                fprintf(stats_out, "/btlneck  %-2u /throttle  %-2u /throttle_cnt  %-2lu /bkpr_cnt  %-2u /bp_drop %-9" PRIu64"/cycle %-9u/rx_diff %-9" PRIu64"/\n, ",
+                        nfs[i].is_bottleneck, nfs[i].throttle_this_upstream_nf, nfs[i].throttle_count, nfs[i].stats.bkpr_count, nfs[i].stats.bkpr_drop, comp_cost, nfs[i].stats.prev_rx);
 
                 if (verbosity_level == ONVM_RAW_STATS_DUMP) {
                         fprintf(stats_out, ONVM_STATS_RAW_DUMP_CONTENT,
@@ -649,4 +653,100 @@ onvm_json_reset_objects(void) {
         cJSON_AddItemToObject(onvm_json_root, ONVM_JSON_PORT_STATS_KEY,
                               onvm_json_port_stats_obj = cJSON_CreateObject());
         cJSON_AddItemToObject(onvm_json_root, ONVM_JSON_NF_STATS_KEY, onvm_json_nf_stats_obj = cJSON_CreateObject());
+}
+
+// NFVNice functions
+
+int get_onvm_nf_stats_snapshot_v2(unsigned nf_index, onvm_stats_snapshot_t *snapshot, unsigned difftime) {
+
+#ifdef INTERRUPT_SEM
+        static stats_cycle_info_t  interval_cycels[MAX_NFS];
+        static onvm_stats_snapshot_t last_snapshot[MAX_NFS];
+
+        //input has time interval defined, then just copy the items stored in last_snapshot
+        unsigned long now = get_current_cpu_cycles();
+        unsigned long difftime_us = get_diff_cpu_cycles_in_us(interval_cycels[nf_index].prev_cycles, now);
+        if (interval_cycels[nf_index].cur_cycles > 0 && difftime_us < difftime) {
+                *snapshot = last_snapshot[nf_index];
+                return 1;
+        }
+
+        interval_cycels[nf_index].cur_cycles = now;
+        interval_cycels[nf_index].prev_cycles = now;
+
+        snapshot->rx_delta = nfs[nf_index].stats.rx - nfs[nf_index].stats.prev_rx;
+        snapshot->rx_drop_delta = nfs[nf_index].stats.rx_drop - nfs[nf_index].stats.prev_rx_drop;
+        snapshot->tx_delta = nfs[nf_index].stats.tx - nfs[nf_index].stats.prev_tx;
+        snapshot->tx_drop_delta = nfs[nf_index].stats.tx_drop - nfs[nf_index].stats.prev_tx_drop;
+
+        nfs[nf_index].stats.prev_rx = nfs[nf_index].stats.rx;
+        nfs[nf_index].stats.prev_rx_drop = nfs[nf_index].stats.rx_drop;
+        nfs[nf_index].stats.prev_tx = nfs[nf_index].stats.tx;
+        nfs[nf_index].stats.prev_tx_drop = nfs[nf_index].stats.tx;
+
+        snapshot->rx_rate       = (snapshot->rx_delta*SECOND_TO_MICRO_SECOND)/difftime;
+        snapshot->serv_rate     = (snapshot->tx_delta*SECOND_TO_MICRO_SECOND)/difftime;
+        snapshot->arrival_rate  = ((snapshot->rx_delta + snapshot->rx_drop_delta)*SECOND_TO_MICRO_SECOND)/difftime;
+        snapshot->tx_rate       = ((snapshot->tx_delta + snapshot->tx_drop_delta)*SECOND_TO_MICRO_SECOND)/difftime;
+        snapshot->rx_drop_rate  = (snapshot->rx_drop_delta*SECOND_TO_MICRO_SECOND)/difftime;
+        snapshot->tx_drop_rate  = (snapshot->tx_drop_delta*SECOND_TO_MICRO_SECOND)/difftime;
+
+        last_snapshot[nf_index] = *snapshot;
+
+#else
+        (void)difftime;
+        snapshot->rx_delta = (nfs[nf_index].stats.rx);
+        snapshot->rx_drop_delta = (nfs[nf_index].stats.rx_drop);
+        snapshot->tx_delta = (nfs[nf_index].stats.tx);
+        snapshot->tx_drop_delta = (nfs[nf_index].stats.tx_drop);
+#endif
+        return 0;
+}
+
+int get_onvm_nf_stats_snapshot(unsigned nf_index, onvm_stats_snapshot_t *snapshot, unsigned difftime) {
+
+#ifdef INTERRUPT_SEM
+        static nf_stats_time_info_t nf_stat_time;
+
+
+        snapshot->rx_delta = nfs[nf_index].stats.rx - nfs[nf_index].stats.prev_rx;
+        snapshot->rx_drop_delta = nfs[nf_index].stats.rx_drop - nfs[nf_index].stats.prev_rx_drop;
+        snapshot->tx_delta = nfs[nf_index].stats.tx - nfs[nf_index].stats.prev_tx;
+        snapshot->tx_drop_delta = nfs[nf_index].stats.tx_drop - nfs[nf_index].stats.prev_tx_drop;
+
+
+        if(difftime) {
+                if(nf_stat_time.in_read == 0) {
+                        if(get_current_time(&nf_stat_time.prev_time) == 0) {
+                                nf_stat_time.in_read = 1;
+                        }
+                        //difftime=0;
+                }
+                else if(0 == get_current_time(&nf_stat_time.cur_time)) {
+                        unsigned long difftime_us = get_difftime_us(&nf_stat_time.prev_time, &nf_stat_time.cur_time);
+                        if(difftime && difftime_us) {
+                                difftime = difftime_us; //MICRO_SECOND_TO_SECOND(difftime_us);
+                                nf_stat_time.prev_time = nf_stat_time.cur_time;
+                        }
+                }
+                nfs[nf_index].stats.prev_rx = nfs[nf_index].stats.rx;
+                nfs[nf_index].stats.prev_rx_drop = nfs[nf_index].stats.rx_drop;
+                nfs[nf_index].stats.prev_tx = nfs[nf_index].stats.tx;
+                nfs[nf_index].stats.prev_tx_drop = nfs[nf_index].stats.tx_drop;
+
+                snapshot->rx_rate       = (snapshot->rx_delta*SECOND_TO_MICRO_SECOND)/difftime;
+                snapshot->serv_rate     = (snapshot->tx_delta*SECOND_TO_MICRO_SECOND)/difftime;
+                snapshot->arrival_rate  = ((snapshot->rx_delta + snapshot->rx_drop_delta)*SECOND_TO_MICRO_SECOND)/difftime;
+                snapshot->tx_rate       = ((snapshot->tx_delta + snapshot->tx_drop_delta)*SECOND_TO_MICRO_SECOND)/difftime;
+                snapshot->rx_drop_rate  = (snapshot->rx_drop_delta*SECOND_TO_MICRO_SECOND)/difftime;
+                snapshot->tx_drop_rate  = (snapshot->tx_drop_delta*SECOND_TO_MICRO_SECOND)/difftime;
+        }
+#else
+        (void)difftime;
+        snapshot->rx_delta = (nfs[nf_index].stats.rx);
+        snapshot->rx_drop_delta = (nfs[nf_index].stats.rx_drop);
+        snapshot->tx_delta = (nfs[nf_index].stats.tx);
+        snapshot->tx_drop_delta = (nfs[nf_index].stats.tx_drop);
+#endif
+        return 0;
 }

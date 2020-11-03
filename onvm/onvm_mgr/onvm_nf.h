@@ -84,11 +84,34 @@ onvm_nf_send_msg(uint16_t dest, uint8_t msg_type, void *msg_data);
 
 // NFVNice functions
 // cgroup
+//Data structure to sort out all active NFs on each core
+typedef struct nfs_per_core {
+        uint16_t sorted;                    //status if the nf_ids list is sorted for wake-up
+        uint16_t count;                     //count of nfs in the list of nf_ids
+        uint32_t nf_ids[MAX_NFS];       //id of the nf <populated in-order and sorted in order needed for wake-up
+        uint64_t run_time[MAX_NFS] ;    //run time of the each of the id, indexed by id itself(not sorted)
+}nfs_per_core_t;
+
+typedef struct nf_schedule_info {
+        uint16_t sorted;
+        nfs_per_core_t nf_list_per_core[MAX_CORES_ON_NODE];
+}nf_schedule_info_t;
+
+extern nf_schedule_info_t nf_sched_param;
+
+void compute_nf_exec_period_and_cgroup_weight(void);
+
+void compute_and_assign_nf_cgroup_weight(void);
+
 void compute_and_order_nf_wake_priority(void);
 
 void monitor_nf_node_liveliness_via_pid_monitoring(void);
 
+void setup_nfs_priority_per_core_list(__attribute__((unused)) unsigned long interval);
+
 void onvm_nf_stats_update(__attribute__((unused)) unsigned long interval);
+
+int nf_sort_func(const void * a, const void *b);
 
 // backpressure
 int onvm_mark_all_entries_for_bottleneck(uint16_t nf_id);

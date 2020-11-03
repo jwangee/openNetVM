@@ -57,6 +57,7 @@
 #include <rte_mbuf.h>
 #include <rte_hash.h>
 #include <rte_ethdev.h>
+#include <rte_cycles.h>
 
 #include "onvm_config_common.h"
 #include "onvm_msg_common.h"
@@ -69,9 +70,10 @@
 
 /* Enable this flag to assign a distinct CGROUP for each NF instance */
 // enable: All 3 (USE_CGROUPS_PER_NF_INSTANCE, ENABLE_DYNAMIC_CGROUP_WEIGHT_ADJUSTMENT, USE_DYNAMIC_LOAD_FACTOR_FOR_CPU_SHARE)
-//#define USE_CGROUPS_PER_NF_INSTANCE                 // To create CGroup per NF instance
-//#define ENABLE_DYNAMIC_CGROUP_WEIGHT_ADJUSTMENT     // To dynamically evaluate and periodically adjust weight on NFs cpu share
-//#define USE_DYNAMIC_LOAD_FACTOR_FOR_CPU_SHARE       // Enable Load*comp_cost (Helpful for TCP but not so for UDP (pktgen Moongen)
+#define USE_CGROUPS_PER_NF_INSTANCE                 // To create CGroup per NF instance
+#define ENABLE_DYNAMIC_CGROUP_WEIGHT_ADJUSTMENT     // To dynamically evaluate and periodically adjust weight on NFs cpu share
+#define USE_DYNAMIC_LOAD_FACTOR_FOR_CPU_SHARE       // Enable Load*comp_cost (Helpful for TCP but not so for UDP (pktgen Moongen)
+#define INTERRUPT_SEM
 
 #ifndef ENABLE_NF_BACKPRESSURE
 #define ENABLE_NF_BACKPRESSURE
@@ -99,6 +101,10 @@
 
 #ifndef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
 #define STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+#endif
+
+#ifndef __DEBUG_LOGS__
+//#define __DEBUG_LOGS__
 #endif
 
 #define SET_BIT(x,bitNum) ((x)|=(1<<(bitNum-1)))
@@ -284,6 +290,33 @@ set_cgroup_nf_cpu_share_from_onvm_mgr(uint16_t instance_id, uint32_t share_val) 
         }
         return 0;
 }
+
+static inline uint64_t get_current_cpu_cycles(void);
+static inline uint64_t get_current_cpu_cycles(void) {
+        return rte_rdtsc_precise();
+}
+
+static inline uint64_t get_diff_cpu_cycles_in_us(uint64_t start, uint64_t end);
+static inline uint64_t get_diff_cpu_cycles_in_us(uint64_t start, uint64_t end) {
+        if(end > start) {
+                return (uint64_t) (((end -start)*SECOND_TO_MICRO_SECOND)/rte_get_tsc_hz());
+        }
+        return 0;
+}
+
+typedef struct stats_time_info {
+        uint8_t in_read;
+        struct timespec prev_time;
+        struct timespec cur_time;
+}nf_stats_time_info_t;
+typedef struct stats_cycle_info {
+        uint8_t in_read;
+        uint64_t prev_cycles;
+        uint64_t cur_cycles;
+}stats_cycle_info_t;
+
+#define MAX_CORES_ON_NODE 40
+#define ARBITER_PERIOD_IN_US            (100)       // 250 micro seconds or 100 micro seconds
 
 // End NFVNice
 
@@ -507,9 +540,7 @@ struct onvm_nf_info {
         uint32_t drop_rate;     //indicates the drops observed within the sampled period.
         uint64_t exec_period;   //indicates the number_of_cycles/timeperiod alloted for execution in this epoch == normalized_load*comp_cost -- how to get this metric: (total_cycles_in_epoch)*(total_load_on_core)/(load_of_nf)
 
-#ifdef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
         histogram_v2_t ht2;
-#endif  //STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
 };
 
 /*
@@ -562,9 +593,15 @@ struct onvm_nf {
          */
         struct {
                 volatile uint64_t rx;
+                volatile uint64_t prev_rx;
                 volatile uint64_t rx_drop;
+                volatile uint64_t prev_rx_drop;
+
                 volatile uint64_t tx;
+                volatile uint64_t prev_tx;
                 volatile uint64_t tx_drop;
+                volatile uint64_t prev_tx_drop;
+
                 volatile uint64_t tx_buffer;
                 volatile uint64_t tx_returned;
                 volatile uint64_t act_out;

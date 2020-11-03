@@ -308,7 +308,7 @@ void hist_store_v2(histogram_v2_t *h, uint32_t val) {
 void hist_compute_v2(histogram_v2_t *h) {
         if(!h) return;
         if((0 == h->is_initialized) && (MIN_SAMPLES_FOR_HISTOGRAM > h->cur_index)) return;
-        if(0 == h->max_val || 0 == h->min_val) return;
+        if(0 == h->max_val) return;
         if(0 == h->is_initialized) {
                 hist_init(&h->histogram,h->max_val+h->min_val/2, h->min_val);
                 h->is_initialized = 1;

@@ -72,6 +72,9 @@
 
 #define ONVM_NO_CALLBACK NULL
 
+#define MAX(x, y) (((x) > (y)) ? (x) : (y))
+#define MIN(x, y) (((x) < (y)) ? (x) : (y))
+
 /******************************Global Variables*******************************/
 struct rte_ring *nf_info_ring = NULL;
 struct rte_mempool *nf_info_mp = NULL;
@@ -115,6 +118,8 @@ struct onvm_configuration *onvm_config;
 uint8_t ONVM_NF_SHARE_CORES;
 
 // NFVNice
+uint64_t counter = 1;
+
 uint32_t get_nf_core_id(void) {
         return rte_lcore_id();
 }
@@ -163,6 +168,10 @@ void init_cgroup_info(struct onvm_nf_info *nf_info) {
         printf("NF on core=%u added to cgroup: %s, ret=%d\n", nf_info->core_id, cg_name,ret);
         return;
 }
+
+#define SAMPLING_RATE 503           // sampling rate to estimate NFs computation cost
+
+#define RTDSC_CYCLE_COST    (20*2) // profiled  approx. 18~27cycles per call
 
 // End NFVNice
 
@@ -660,6 +669,10 @@ onvm_nflib_thread_main_loop(void *arg) {
         uint16_t nb_pkts_added;
         uint64_t start_time;
         int ret;
+#ifdef USE_CGROUPS_PER_NF_INSTANCE
+        uint64_t start_tsc = 0;
+        uint64_t diff_tsc = 0;
+#endif // USE_CGROUPS_PER_NF_INSTANCE
 
         nf_local_ctx = (struct onvm_nf_local_ctx *)arg;
         nf = nf_local_ctx->nf;
@@ -693,8 +706,32 @@ onvm_nflib_thread_main_loop(void *arg) {
                         }
                 }
 
+                // NFVNice
+#ifdef USE_CGROUPS_PER_NF_INSTANCE
+                if (counter % SAMPLING_RATE == 0) {
+                        start_tsc = rte_rdtsc();
+                }
+#endif // USE_CGROUPS_PER_NF_INSTANCE
+
                 nb_pkts_added =
                         onvm_nflib_dequeue_packets((void **)pkts, nf_local_ctx, nf->function_table->pkt_handler);
+
+#ifdef USE_CGROUPS_PER_NF_INSTANCE
+                if (nb_pkts_added > 0) {
+                    if (counter % SAMPLING_RATE == 0) {
+                        diff_tsc = MAX(rte_rdtsc() - start_tsc, 1);
+
+#ifdef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+                        hist_store_v2(&nf_info->ht2, diff_tsc);
+#else
+                        nf_info->comp_cost = (nf_info->comp_cost == 0)? (diff_tsc) : ((nf_info->comp_cost + diff_tsc)/2);
+                        //RTE_LOG(INFO, APP, "%d\n", nf_info->comp_cost);
+#endif // STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+                        counter = 1;
+                    }
+                    counter += 1;
+                }
+#endif // USE_CGROUPS_PER_NF_INSTANCE
 
                 if (likely(nb_pkts_added > 0)) {
                         onvm_pkt_process_tx_batch(nf->nf_tx_mgr, pkts, nb_pkts_added, nf);

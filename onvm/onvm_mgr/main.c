@@ -292,11 +292,22 @@ wakeup_thread_main(void *arg) {
                         wakeup_ctx->first_nf, wakeup_ctx->last_nf - 1);
         }
 
+        uint64_t now = rte_rdtsc();
+        uint64_t prev = now;
         for (; worker_keep_running;) {
                 // NFVNice
+#ifdef INTERRUPT_SEM
 #ifdef ENABLE_NF_BACKPRESSURE
                 check_and_enqueue_or_dequeue_nfs_from_bottleneck_watch_list();
+
+                now = rte_rdtsc();
+                if (now - prev > 10000000000) {
+                    compute_and_order_nf_wake_priority();
+                    onvm_nf_stats_update(0);
+                    prev = now;
+                }
 #endif //ENABLE_NF_BACKPRESSURE
+#endif // INTERRUPT_SEM
 
                 for (i = wakeup_ctx->first_nf; i < wakeup_ctx->last_nf; i++) {
                         nf = &nfs[i];
