@@ -52,6 +52,7 @@
 
 #include <getopt.h>
 #include <signal.h>
+#include <stdlib.h>
 
 /******************************DPDK libraries*********************************/
 #include "rte_malloc.h"
@@ -72,6 +73,9 @@
 #define ONVM_NO_CALLBACK NULL
 
 /******************************Global Variables*******************************/
+struct rte_ring *nf_info_ring = NULL;
+struct rte_mempool *nf_info_mp = NULL;
+struct onvm_nf_info *nf_info = NULL;
 
 // Shared data for host port information
 struct port_info *ports;
@@ -109,6 +113,58 @@ struct onvm_configuration *onvm_config;
 
 /* Flag to check if shared core mutex sleep/wakeup is enabled */
 uint8_t ONVM_NF_SHARE_CORES;
+
+// NFVNice
+uint32_t get_nf_core_id(void) {
+        return rte_lcore_id();
+}
+
+int set_cgroup_cpu_share(struct onvm_nf_info *nf_info, unsigned int share_val) {
+        /*
+        unsigned long shared_bw_val = (share_val== 0) ?(1024):(1024*share_val/100); //when share_val is relative(%)
+        if (share_val >=100) {
+                shared_bw_val = shared_bw_val/100;
+        }*/
+
+        unsigned long shared_bw_val = (share_val== 0) ?(1024):(share_val);  //when share_val is absolute bandwidth
+        const char* cg_set_cmd = get_cgroup_set_cpu_share_cmd(nf_info->instance_id, shared_bw_val);
+        printf("\n CMD_TO_SET_CPU_SHARE: %s\n", cg_set_cmd);
+        int ret = system(cg_set_cmd);
+        if  (0 == ret) {
+                nf_info->cpu_share = shared_bw_val;
+        }
+        return ret;
+}
+
+void init_cgroup_info(struct onvm_nf_info *nf_info) {
+        int ret = 0;
+        const char* cg_name = get_cgroup_name(nf_info->instance_id);
+        const char* cg_path = get_cgroup_path(nf_info->instance_id);
+        printf("\n NF cgroup name and path: %s, %s", cg_name,cg_path);
+
+        /* Check and create the CGROUP if necessary */
+        const char* cg_crt_cmd = get_cgroup_create_cgroup_cmd(nf_info->instance_id);
+        printf("\n CMD_TO_CREATE_CGROUP_for_NF: %d, %s", nf_info->instance_id, cg_crt_cmd);
+        ret = system(cg_crt_cmd);
+
+        /* Add the pid to the CGROUP */
+        const char* cg_add_cmd = get_cgroup_add_task_cmd(nf_info->instance_id, nf_info->pid);
+        printf("\n CMD_TO_ADD_NF_TO_CGROUP: %s", cg_add_cmd);
+        ret = system(cg_add_cmd);
+
+        /* Retrieve the mapped core-id */
+        if (nf_info->core_id <= 0) {
+            nf_info->core_id = get_nf_core_id();
+        }
+
+        /* Initialize the cpu.shares to default value (100%) */
+        ret = set_cgroup_cpu_share(nf_info, 0);
+
+        printf("NF on core=%u added to cgroup: %s, ret=%d\n", nf_info->core_id, cg_name,ret);
+        return;
+}
+
+// End NFVNice
 
 /***********************Internal Functions Prototypes*************************/
 
@@ -220,6 +276,9 @@ onvm_nflib_thread_main_loop(void *arg);
  */
 static void
 init_shared_core_mode_info(uint16_t instance_id);
+
+static struct onvm_nf_info *
+onvm_nflib_info_init(const char *tag);
 
 /*
  * Signal handler to catch SIGINT/SIGTERM.
@@ -398,6 +457,25 @@ onvm_nflib_init(int argc, char *argv[], const char *nf_tag, struct onvm_nf_local
          */
         retval_final = (retval_eal + retval_parse) - 1;
 
+        // NFVNice
+        nf_info_mp = rte_mempool_lookup(_NF_INFO_MEMPOOL_NAME);
+        if (nf_info_mp == NULL)
+                rte_exit(EXIT_FAILURE, "No Client Info mempool - bye\n");
+
+        /* Initialize the info struct */
+        nf_info = onvm_nflib_info_init(nf_tag);
+
+        nf_info_ring = rte_ring_lookup(_NF_INFO_MEMPOOL_NAME);
+        if (nf_info_ring == NULL)
+                rte_exit(EXIT_FAILURE, "Cannot get nf_info ring");
+
+        /* Put this NF's info struct onto queue for manager to process startup */
+        if (rte_ring_enqueue(nf_info_ring, nf_info) < 0) {
+                rte_mempool_put(nf_info_mp, nf_info); // give back mermory
+                rte_exit(EXIT_FAILURE, "Cannot send nf_info to manager");
+        }
+        // End NFVNice
+
         if ((ret = onvm_nflib_start_nf(nf_local_ctx, nf_init_cfg)) < 0)
                 return ret;
 
@@ -505,6 +583,12 @@ onvm_nflib_start_nf(struct onvm_nf_local_ctx *nf_local_ctx, struct onvm_nf_init_
         }
 
         nf = &nfs[nf_init_cfg->instance_id];
+        // NFVNice
+        nf_info->instance_id = nf->instance_id;
+        nf_info->service_id = nf->service_id;
+        nf_info->core_id = nf->thread_info.core;
+        nf->info = nf_info;
+        assert(nf->instance_id == nf_info->instance_id);
 
         /* Mark init as finished, sig handler/onvm_nflib_stop will now do proper cleanup */
         if (rte_atomic16_read(&nf_local_ctx->nf_init_finished) == 0) {
@@ -585,6 +669,15 @@ onvm_nflib_thread_main_loop(void *arg) {
         ret = onvm_nflib_nf_ready(nf);
         if (ret != 0)
                 rte_exit(EXIT_FAILURE, "Unable to message manager\n");
+
+        // NFVNice
+        if (nf_info != NULL) {
+            init_cgroup_info(nf_info);
+            nf_info->status = NF_RUNNING;
+            nf_info->pid = getpid();
+            hist_init_v2(&nf_info->ht2);
+            RTE_LOG(INFO, APP, "Initialize cgroup info: pid %d\n", nf_info->pid);
+        }
 
         /* Run the setup function (this might send pkts so done after the state change) */
         if (nf->function_table->setup != NULL)
@@ -1272,6 +1365,9 @@ onvm_nflib_cleanup(struct onvm_nf_local_ctx *nf_local_ctx) {
                 nf->function_table = NULL;
         }
 
+        // NFVNice
+        nf->info = NULL;
+
         if (mgr_msg_queue == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot get mgr message ring for shutdown");
         if (rte_mempool_get(nf_msg_pool, (void **)(&shutdown_msg)) != 0)
@@ -1410,4 +1506,32 @@ onvm_nflib_stats_summary_output(uint16_t id) {
 
         printf("CSV file written to %s directory\n", nf_tag);
         free(csv_filename);
+}
+
+/******************************NFVNice functions*******************************/
+
+static struct onvm_nf_info *
+onvm_nflib_info_init(const char *tag)
+{
+        void *mempool_data;
+        struct onvm_nf_info *info;
+
+        if (rte_mempool_get(nf_info_mp, &mempool_data) < 0) {
+                rte_exit(EXIT_FAILURE, "Failed to get client info memory");
+        }
+
+        if (mempool_data == NULL) {
+                rte_exit(EXIT_FAILURE, "Client Info struct not allocated");
+        }
+
+        info = (struct onvm_nf_info*) mempool_data;
+        info->instance_id = NF_NO_ID;
+        //info->service_id = service_id;
+        info->status = NF_WAITING_FOR_ID;
+        //info->tag = rte_malloc("nf_tag", TAG_SIZE, 0);
+        //strncpy(info->tag, tag, TAG_SIZE);
+        //info->tag[TAG_SIZE - 1] = '\0';
+        info->tag = tag;
+
+        return info;
 }

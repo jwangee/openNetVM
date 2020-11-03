@@ -55,6 +55,15 @@
 #include "onvm_pkt_common.h"
 #include "onvm_threading.h"
 
+// NFVNice
+// ring used to place new nf_info struct
+extern struct rte_ring *nf_info_ring;
+
+// Shared pool for all clients info
+extern struct rte_mempool *nf_info_mp;
+
+extern struct onvm_nf_info *nf_info;
+
 /************************************API**************************************/
 
 /**
@@ -296,5 +305,21 @@ onvm_nflib_get_onvm_config(void);
  */
 void
 onvm_nflib_stats_summary_output(uint16_t id);
+
+// NFVNice
+
+// Shared data for client info
+//extern struct onvm_nf_info *nf_info;
+
+// Shared pool for all clients info
+//static struct rte_mempool *nf_info_mp;
+
+uint32_t get_nf_core_id(void);
+
+void init_cgroup_info(struct onvm_nf_info *nf_info);
+
+int set_cgroup_cpu_share(struct onvm_nf_info *nf_info, unsigned int share_val);
+
+// End NFVNice
 
 #endif // _ONVM_NFLIB_H_

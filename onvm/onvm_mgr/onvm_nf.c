@@ -660,3 +660,91 @@ int check_and_enqueue_or_dequeue_nfs_from_bottleneck_watch_list(void) {
         }
         return ret;
 }
+
+// NFVNice functions - cgroup
+
+/*
+ * This function computes and assigns weights to each nfs cgroup based on its contention and requirements
+ * PRerequisite: nfs[]->info->comp_cost and  nfs[]->info->load should be already updated.  -- updated by extract_nf_load_and_svc_rate_info()
+ */
+static inline void assign_nf_cgroup_weight(uint16_t nf_id) {
+        if ((onvm_nf_is_valid(&nfs[nf_id])) && (nfs[nf_id].info && nfs[nf_id].info->comp_cost)) {
+                set_cgroup_nf_cpu_share_from_onvm_mgr(nfs[nf_id].info->instance_id, nfs[nf_id].info->cpu_share);
+        }
+}
+
+static inline void assign_all_nf_cgroup_weight(void) {
+        uint16_t nf_id = 0;
+        for (nf_id=0; nf_id < MAX_NFS; nf_id++) {
+                assign_nf_cgroup_weight(nf_id);
+        }
+}
+
+void
+onvm_nf_stats_update(__attribute__((unused)) unsigned long interval) {
+    assign_all_nf_cgroup_weight();
+}
+
+inline void extract_nf_load_and_svc_rate_info(__attribute__((unused)) unsigned long interval) {
+#if defined (USE_CGROUPS_PER_NF_INSTANCE)
+        uint16_t nf_id = 0;
+        for (; nf_id < MAX_NFS; nf_id++) {
+                struct onvm_nf *cl = &nfs[nf_id];
+                if (onvm_nf_is_valid(cl)){
+                        static onvm_stats_snapshot_t st;
+                        get_onvm_nf_stats_snapshot_v2(nf_id,&st,0);
+                        cl->info->load      =  (st.rx_delta + st.rx_drop_delta);//(cl->stats.rx - cl->stats.prev_rx + cl->stats.rx_drop - cl->stats.prev_rx_drop); //rte_ring_count(cl->rx_q);
+                        cl->info->avg_load  =  ((cl->info->avg_load == 0) ? (cl->info->load):((cl->info->avg_load + cl->info->load) /2));   // (((1-EWMA_LOAD_ADECAY)*cl->info->avg_load) + (EWMA_LOAD_ADECAY*cl->info->load))
+                        cl->info->svc_rate  =  (st.tx_delta); //(nfs_stats->tx[nf_id] -  nfs_stats->prev_tx[nf_id]);
+                        cl->info->avg_svc   =  ((cl->info->avg_svc == 0) ? (cl->info->svc_rate):((cl->info->avg_svc + cl->info->svc_rate) /2));
+                        cl->info->drop_rate =  (st.rx_drop_rate);
+
+#ifdef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+                        //Get the Median Computation cost, instead of running average; else running average is expected to be set already.
+                        cl->info->comp_cost = hist_extract_v2(&cl->info->ht2, VAL_TYPE_MEDIAN);
+#endif //STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+                }
+                else if (cl && cl->info) {
+                        cl->info->load      = 0;
+                        cl->info->avg_load  = 0;
+                        cl->info->svc_rate  = 0;
+                        cl->info->avg_svc   = 0;
+                }
+        }
+
+        //compute the execution_period_and_cgroup_weight    -- better to separate the two??
+        compute_nf_exec_period_and_cgroup_weight();
+
+        //sort and prepare the list of nfs_per_core_per_pool in the decreasing order of priority; use this list to wake up the NFs
+        setup_nfs_priority_per_core_list(interval);
+#endif
+}
+
+void compute_and_order_nf_wake_priority(void) {
+        //Decouple The evaluation and wakee-up logic : move the code to main thread, which can perform this periodically;
+        /* Firs:t extract load charactersitics in this epoch
+         * Second: sort and prioritize NFs based on the demand matrix in this epoch
+         * Finally: wake up the tasks in the identified priority
+         * */
+#if defined (USE_CGROUPS_PER_NF_INSTANCE)
+        extract_nf_load_and_svc_rate_info(0);   //setup_nfs_priority_per_core_list(0);
+#endif  //USE_CGROUPS_PER_NF_INSTANCE
+        return;
+}
+
+void monitor_nf_node_liveliness_via_pid_monitoring(void) {
+        uint16_t nf_id = 0;
+
+        for (; nf_id < MAX_NFS; nf_id++) {
+                if (onvm_nf_is_valid(&nfs[nf_id])){
+                        if (kill(nfs[nf_id].info->pid, 0)) {
+                                printf("\n\n******* Moving NF with InstanceID:%d state %d to STOPPED\n\n",nfs[nf_id].info->instance_id, nfs[nf_id].info->status);
+                                nfs[nf_id].info->status = NF_STOPPED;
+                                //**** TO DO: Take necessary actions here: It still doesn't clean-up until the new_nf_pool is populated by adding/killing another NF instance.
+                                rte_ring_enqueue(nf_info_queue, nfs[nf_id].info);
+                                rte_mempool_put(nf_info_pool, nfs[nf_id].info);
+                                // Still the IDs are not recycled.. missing some additional changes:: found bug in the way the IDs are recycled-- fixed change in onvm_nf_next_instance_id()
+                        }
+                }
+        }
+}

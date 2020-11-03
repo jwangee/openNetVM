@@ -45,6 +45,7 @@
 #include <stdint.h>
 
 /* Std C library includes for shared core */
+#include <stdlib.h>
 #include <sys/shm.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -59,11 +60,18 @@
 
 #include "onvm_config_common.h"
 #include "onvm_msg_common.h"
+#include "histogram.h"
 
 /**********************************NFVNice************************************/
 #ifndef FAAS_HASH
 #define FAAS_HASH
 #endif
+
+/* Enable this flag to assign a distinct CGROUP for each NF instance */
+// enable: All 3 (USE_CGROUPS_PER_NF_INSTANCE, ENABLE_DYNAMIC_CGROUP_WEIGHT_ADJUSTMENT, USE_DYNAMIC_LOAD_FACTOR_FOR_CPU_SHARE)
+//#define USE_CGROUPS_PER_NF_INSTANCE                 // To create CGroup per NF instance
+//#define ENABLE_DYNAMIC_CGROUP_WEIGHT_ADJUSTMENT     // To dynamically evaluate and periodically adjust weight on NFs cpu share
+//#define USE_DYNAMIC_LOAD_FACTOR_FOR_CPU_SHARE       // Enable Load*comp_cost (Helpful for TCP but not so for UDP (pktgen Moongen)
 
 #ifndef ENABLE_NF_BACKPRESSURE
 #define ENABLE_NF_BACKPRESSURE
@@ -87,6 +95,10 @@
 
 #ifndef USE_BKPR_V2_IN_TIMER_MODE
 //#define USE_BKPR_V2_IN_TIMER_MODE
+#endif
+
+#ifndef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+#define STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
 #endif
 
 #define SET_BIT(x,bitNum) ((x)|=(1<<(bitNum-1)))
@@ -184,6 +196,96 @@ static inline unsigned long get_difftime_us(struct timespec *pStart, struct time
         //printf("Delta [%ld], sec:[%ld]: nanosec [%ld]", delta, (pEnd->tv_sec - pStart->tv_sec), (pEnd->tv_nsec - pStart->tv_nsec));
         return delta;
 }
+
+// CGroup related
+#define MP_CLIENT_CGROUP_NAME "nf_%u"
+#define MP_CLIENT_CGROUP_PATH "/sys/fs/cgroup/cpu/nf_%u/"
+#define MP_CLIENT_CGROUP_CREAT "mkdir /sys/fs/cgroup/cpu/nf_%u"
+#define MP_CLIENT_CGROUP_ADD_TASK "echo %u > /sys/fs/cgroup/cpu/nf_%u/tasks"
+
+static inline const char *
+get_cgroup_name(unsigned id)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_NAME) + 2];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_NAME, id);
+        return buffer;
+}
+
+static inline const char *
+get_cgroup_path(unsigned id)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_PATH) + 2];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_PATH, id);
+        return buffer;
+}
+
+static inline const char *
+get_cgroup_create_cgroup_cmd(unsigned id)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_CREAT) + 2];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_CREAT, id);
+        return buffer;
+}
+
+static inline const char *
+get_cgroup_add_task_cmd(unsigned id, pid_t pid)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_ADD_TASK) + 10];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_ADD_TASK, pid, id);
+        return buffer;
+}
+
+#define MP_CLIENT_CGROUP_SET_CPU_SHARE "echo %u > /sys/fs/cgroup/cpu/nf_%u/cpu.shares"
+#define MP_CLIENT_CGROUP_SET_CPU_SHARE_ONVM_MGR "/sys/fs/cgroup/cpu/nf_%u/cpu.shares"
+
+static inline const char *
+get_cgroup_set_cpu_share_cmd(unsigned id, unsigned share)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_SET_CPU_SHARE) + 20];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_SET_CPU_SHARE, share, id);
+        return buffer;
+}
+
+static inline int
+set_cgroup_nf_cpu_share(uint16_t instance_id, uint32_t share_val) {
+        /*
+        unsigned long shared_bw_val = (share_val== 0) ?(1024):(1024*share_val/100); //when share_val is relative(%)
+        if (share_val >=100) {
+                shared_bw_val = shared_bw_val/100;
+        }*/
+
+        uint32_t shared_bw_val = (share_val== 0) ?(1024):(share_val);  //when share_val is absolute bandwidth
+        const char* cg_set_cmd = get_cgroup_set_cpu_share_cmd(instance_id, shared_bw_val);
+        //printf("\n CMD_TO_SET_CPU_SHARE: %s \n", cg_set_cmd);
+
+        int ret = system(cg_set_cmd);
+        return ret;
+}
+
+static inline const char *
+get_cgroup_set_cpu_share_cmd_onvm_mgr(unsigned id)
+{
+        static char buffer[sizeof(MP_CLIENT_CGROUP_SET_CPU_SHARE) + 20];
+        snprintf(buffer, sizeof(buffer) - 1, MP_CLIENT_CGROUP_SET_CPU_SHARE_ONVM_MGR, id);
+        return buffer;
+}
+
+static inline int
+set_cgroup_nf_cpu_share_from_onvm_mgr(uint16_t instance_id, uint32_t share_val) {
+        FILE *fp = NULL;
+        uint32_t shared_bw_val = (share_val == 0) ?(1024):(share_val);  //when share_val is absolute bandwidth
+        const char* cg_set_cmd = get_cgroup_set_cpu_share_cmd_onvm_mgr(instance_id);
+
+        //printf("\n CMD_TO_SET_CPU_SHARE: %s \n", cg_set_cmd);
+        fp = fopen(cg_set_cmd, "w");            //optimize with mmap if that is allowed!!
+        if (fp){
+                fprintf(fp,"%d",shared_bw_val);
+                fclose(fp);
+        }
+        return 0;
+}
+
+// End NFVNice
 
 /********************************OpenNetVM************************************/
 
@@ -384,6 +486,33 @@ struct onvm_nf_local_ctx {
 };
 
 /*
+ * Define a structure to describe one NF
+ */
+struct onvm_nf_info {
+        uint16_t instance_id;
+        uint16_t service_id;
+        uint8_t status;
+        const char *tag;
+
+        pid_t pid;
+        uint32_t comp_cost;     //indicates the computation cost of NF in num_of_cycles
+
+        uint32_t cpu_share;     //indicates current share of NFs cpu
+        uint32_t core_id;       //indicates the core ID the NF is running on
+        uint32_t comp_pkts;     //[usage: TBD] indicates the number of pkts processed by NF over specific sampling period (demand (new pkts arrival) = Rx, better? or serviced (new pkts sent out) = Tx better?)
+        uint32_t load;          //indicates instantaneous load on the NF ( = num_of_packets on the rx_queue + pkts dropped on Rx)
+        uint32_t avg_load;      //indicates the average load on the NF
+        uint32_t svc_rate;      //indicates instantaneous service rate of the NF ( = num_of_packets processed in the sampling period)
+        uint32_t avg_svc;       //indicates the average service rate of the NF
+        uint32_t drop_rate;     //indicates the drops observed within the sampled period.
+        uint64_t exec_period;   //indicates the number_of_cycles/timeperiod alloted for execution in this epoch == normalized_load*comp_cost -- how to get this metric: (total_cycles_in_epoch)*(total_load_on_core)/(load_of_nf)
+
+#ifdef STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+        histogram_v2_t ht2;
+#endif  //STORE_HISTOGRAM_OF_NF_COMPUTATION_COST
+};
+
+/*
  * Define a NF structure with all needed info, including:
  *      thread information, function callbacks, flags, stats and shared core info.
  *
@@ -401,6 +530,9 @@ struct onvm_nf {
         char *tag;
         /* Pointer to NF defined state data */
         void *data;
+
+        /* NFVNice: chain rate info */
+        struct onvm_nf_info *info;
 
         struct {
                 uint16_t core;
@@ -483,6 +615,21 @@ struct onvm_nf_init_cfg {
         uint16_t time_to_live;
         /* If set NF will stop after pkts TX reach pkt_limit */
         uint16_t pkt_limit;
+
+        pid_t pid;
+        uint32_t comp_cost;     //indicates the computation cost of NF in num_of_cycles
+
+        uint32_t cpu_share;     //indicates current share of NFs cpu
+        uint32_t core_id;       //indicates the core ID the NF is running on
+        uint32_t comp_pkts;     //[usage: TBD] indicates the number of pkts processed by NF over specific sampling period (demand (new pkts arrival) = Rx, better? or serviced (new pkts sent out) = Tx better?)
+        uint32_t load;          //indicates instantaneous load on the NF ( = num_of_packets on the rx_queue + pkts dropped on Rx)
+        uint32_t avg_load;      //indicates the average load on the NF
+        uint32_t svc_rate;      //indicates instantaneous service rate of the NF ( = num_of_packets processed in the sampling period)
+        uint32_t avg_svc;       //indicates the average service rate of the NF
+        uint32_t drop_rate;     //indicates the drops observed within the sampled period.
+        uint64_t exec_period;   //indicates the number_of_cycles/timeperiod alloted for execution in this epoch == normalized_load*comp_cost -- how to get this metric: (total_cycles_in_epoch)*(total_load_on_core)/(load_of_nf)
+
+        histogram_v2_t ht2;
 };
 
 /*
@@ -537,7 +684,11 @@ struct ft_request {
 #define _MGR_MSG_QUEUE_NAME "MSG_MSG_QUEUE"
 #define _NF_MSG_QUEUE_NAME "NF_%u_MSG_QUEUE"
 #define _NF_MEMPOOL_NAME "NF_INFO_MEMPOOL"
+#define _NF_INFO_MEMPOOL_NAME "NF_INFO_NFVNICE_MEMPOOL"
 #define _NF_MSG_POOL_NAME "NF_MSG_MEMPOOL"
+// NFVNice
+#define _NF_QUEUE_NAME "NF_INFO_QUEUE"
+// End NFVNice
 
 /* interrupt semaphore specific updates */
 #define SHMSZ 4                         // size of shared memory segement (page_size)

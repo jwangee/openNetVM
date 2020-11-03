@@ -116,6 +116,10 @@ extern struct rte_ring *incoming_msg_queue;
 extern struct port_info *ports;
 extern struct core_status *cores;
 
+// NFVNice: NF info for cgroup
+extern struct rte_mempool *nf_info_pool;
+extern struct rte_ring *nf_info_queue;
+
 extern struct rte_mempool *pktmbuf_pool;
 extern struct rte_mempool *nf_msg_pool;
 extern uint16_t num_nfs;

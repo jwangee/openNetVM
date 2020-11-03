@@ -83,6 +83,14 @@ int
 onvm_nf_send_msg(uint16_t dest, uint8_t msg_type, void *msg_data);
 
 // NFVNice functions
+// cgroup
+void compute_and_order_nf_wake_priority(void);
+
+void monitor_nf_node_liveliness_via_pid_monitoring(void);
+
+void onvm_nf_stats_update(__attribute__((unused)) unsigned long interval);
+
+// backpressure
 int onvm_mark_all_entries_for_bottleneck(uint16_t nf_id);
 
 int onvm_clear_all_entries_for_bottleneck(uint16_t nf_id);

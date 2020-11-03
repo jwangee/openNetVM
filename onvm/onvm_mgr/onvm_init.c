@@ -61,6 +61,10 @@ struct rte_mempool *pktmbuf_pool;
 struct rte_mempool *nf_init_cfg_pool;
 struct rte_mempool *nf_msg_pool;
 struct rte_ring *incoming_msg_queue;
+// NFVNice
+struct rte_mempool *nf_info_pool;
+struct rte_ring *nf_info_queue;
+
 uint16_t **services;
 uint16_t *nf_per_service_count;
 struct onvm_service_chain *default_chain;
@@ -76,6 +80,12 @@ init_mbuf_pools(void);
 
 static int
 init_nf_init_cfg_pool(void);
+
+static int
+init_nf_info_pool(void);
+
+static int
+init_nf_info_queue(void);
 
 static int
 init_nf_msg_pool(void);
@@ -224,6 +234,13 @@ init(int argc, char *argv[]) {
                 rte_exit(EXIT_FAILURE, "Cannot create nf message pool: %s\n", rte_strerror(rte_errno));
         }
 
+        // NFVNice
+        /* initialise nf info pool */
+        retval = init_nf_info_pool();
+        if (retval != 0) {
+                rte_exit(EXIT_FAILURE, "Cannot create nf info mbuf pool: %s\n", rte_strerror(rte_errno));
+        }
+
         /* now initialise the ports we will use */
         for (i = 0; i < ports->num_ports; i++) {
                 port_id = ports->id[i];
@@ -243,6 +260,9 @@ init(int argc, char *argv[]) {
 
         /* initialise the shared memory for shared core mode */
         init_shared_sem();
+
+        // NFVNice
+        init_nf_info_queue();
 
         /*initialize a default service chain*/
         default_chain = onvm_sc_create();
@@ -512,4 +532,38 @@ check_all_ports_link_status(uint8_t port_num, uint32_t port_mask) {
                         printf("done\n");
                 }
         }
+}
+
+// NFVNice functions
+
+/**
+ * Set up a mempool to store nf_info structs
+ */
+static int
+init_nf_info_pool(void) {
+        /* don't pass single-producer/single-consumer flags to mbuf
+         * create as it seems faster to use a cache instead */
+        printf("Creating mbuf pool '%s' ...\n", _NF_INFO_MEMPOOL_NAME);
+        nf_info_pool = rte_mempool_create(_NF_INFO_MEMPOOL_NAME, MAX_NFS, NF_INFO_SIZE, 0, 0, NULL, NULL, NULL, NULL,
+                                          rte_socket_id(), NO_FLAGS);
+
+        return (nf_info_pool == NULL); /* 0 on success */
+}
+
+/**
+ * Allocate a rte_ring for newly created NFs
+ */
+static int
+init_nf_info_queue(void)
+{
+        nf_info_queue = rte_ring_create(
+                _NF_INFO_MEMPOOL_NAME,
+                MAX_NFS,
+                rte_socket_id(),
+                RING_F_SC_DEQ); // MP enqueue (default), SC dequeue
+
+        if (nf_info_queue == NULL)
+                rte_exit(EXIT_FAILURE, "Cannot create nf info queue\n");
+
+        return 0;
 }
