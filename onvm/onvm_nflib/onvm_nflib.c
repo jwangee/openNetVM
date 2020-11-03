@@ -1403,7 +1403,7 @@ onvm_nflib_cleanup(struct onvm_nf_local_ctx *nf_local_ctx) {
         }
 
         // NFVNice
-        nf->info = NULL;
+        //nf->info = NULL;
 
         if (mgr_msg_queue == NULL)
                 rte_exit(EXIT_FAILURE, "Cannot get mgr message ring for shutdown");

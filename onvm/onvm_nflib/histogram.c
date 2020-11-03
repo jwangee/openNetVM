@@ -56,7 +56,7 @@ void hist_store(volatile struct histogram *h, uint32_t val) {
         h->running_avg = RUN_AVG(h->running_avg, val);
 
 #ifndef USE_HISTOGRAM_AS_LIB
-        printf("[V:%d, A:%d]\n", val, h->running_avg);
+        //printf("[V:%d, A:%d]\n", val, h->running_avg);
 #endif
         h->data[index]++;
         h->total_count++;
