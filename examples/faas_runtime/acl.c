@@ -88,25 +88,57 @@ struct onvm_fw_rule **setup_rules(int *total_rules) {
         int ip_range_1 = 30;
         int ip_range_2 = 50;
         int num_rules = ip_range_1 * ip_range_2 + 1;
+        acl_num_rules = num_rules;
         *total_rules = num_rules;
 
         rules = (struct onvm_fw_rule **) malloc(num_rules * sizeof(struct onvm_fw_rule *));
 
-        for (int i = 0; i < ip_range_1; ++i) {
-            for (int j = 0; j < ip_range_2; ++i) {
-                rules[i]->src_ip = get_ipv4_value("172.12.0.1");
-                rules[i]->dst_ip = get_ipv4_value("172.13.0.1");
-                rules[i]->depth = 32;
-                rules[i]->src_port = 12345;
-                rules[i]->dst_port = 54321;
-            }
+        for (int i = 0; i < num_rules; ++i) {
+            rules[i] = (struct onvm_fw_rule *) malloc(sizeof(struct onvm_fw_rule));
+            rules[i]->src_ip = get_ipv4_value("172.12.0.1");
+            rules[i]->dst_ip = get_ipv4_value("172.13.0.1");
+            rules[i]->depth = 32;
+            rules[i]->src_port = 0;
+            rules[i]->dst_port = 0;
         }
-        rules[num_rules]->src_ip = 0;
-        rules[num_rules]->dst_ip = 0;
-        rules[num_rules]->depth = 0;
-        rules[num_rules]->src_port = 0;
-        rules[num_rules]->dst_port = 0;
 
+        // The last rule matches all.
+        rules[num_rules-1]->src_ip = 0;
+        rules[num_rules-1]->dst_ip = 0;
+        rules[num_rules-1]->depth = 0;
+        rules[num_rules-1]->src_port = 0;
+        rules[num_rules-1]->dst_port = 0;
+        rules[num_rules-1]->action = 0;
+        RTE_LOG(INFO, APP, "ACL # of rules: %d\n", num_rules);
+        return rules;
+}
+
+struct onvm_fw_rule **bpf_setup_rules(int *total_rules) {
+        int ip_range_1 = 20;
+        int ip_range_2 = 10;
+        int num_rules = ip_range_1 * ip_range_2 + 1;
+        acl_num_rules = num_rules;
+        *total_rules = num_rules;
+
+        rules = (struct onvm_fw_rule **) malloc(num_rules * sizeof(struct onvm_fw_rule *));
+
+        for (int i = 0; i < num_rules; ++i) {
+            rules[i] = (struct onvm_fw_rule *) malloc(sizeof(struct onvm_fw_rule));
+            rules[i]->src_ip = get_ipv4_value("172.12.0.1");
+            rules[i]->dst_ip = get_ipv4_value("172.13.0.1");
+            rules[i]->depth = 32;
+            rules[i]->src_port = 0;
+            rules[i]->dst_port = 0;
+        }
+
+        // The last rule matches all.
+        rules[num_rules-1]->src_ip = 0;
+        rules[num_rules-1]->dst_ip = 0;
+        rules[num_rules-1]->depth = 0;
+        rules[num_rules-1]->src_port = 0;
+        rules[num_rules-1]->dst_port = 0;
+        rules[num_rules-1]->action = 0;
+        RTE_LOG(INFO, APP, "ACL # of rules: %d", num_rules);
         return rules;
 }
 

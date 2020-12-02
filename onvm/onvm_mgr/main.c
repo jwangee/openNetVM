@@ -182,6 +182,11 @@ master_thread_main(void) {
 static int
 rx_thread_main(void *arg) {
         uint16_t i, rx_count, cur_lcore;
+        struct rte_mbuf *vswitch_pkts[PACKET_READ_SIZE];
+        for (i = 0; i < PACKET_READ_SIZE; ++i) {
+            vswitch_pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool);
+        }
+
         struct rte_mbuf *pkts[PACKET_READ_SIZE];
         struct queue_mgr *rx_mgr = (struct queue_mgr *)arg;
         cur_lcore = rte_lcore_id();
@@ -192,7 +197,17 @@ rx_thread_main(void *arg) {
         for (; worker_keep_running;) {
                 /* Read ports */
                 for (i = 0; i < ports->num_ports; i++) {
+                        // apply one packet copy
                         rx_count = rte_eth_rx_burst(ports->id[i], rx_mgr->id, pkts, PACKET_READ_SIZE);
+
+                        for (int idx = 0; idx < rx_count; ++idx) {
+                            rte_memcpy(rte_pktmbuf_mtod(vswitch_pkts[i], char *), pkts[i], pkts[i]->pkt_len);
+                        }
+                        for (int idx = 0; idx < rx_count; ++idx) {
+                            rte_pktmbuf_free(vswitch_pkts[i]);
+                            vswitch_pkts[i] = rte_pktmbuf_alloc(pktmbuf_pool);
+                        }
+
                         ports->rx_stats.rx[ports->id[i]] += rx_count;
 
                         /* Now process the NIC packets read */

@@ -211,7 +211,7 @@ void faas_handle_egress(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta) {
     rte_ether_addr_copy(&tmp, &(eth->s_addr));
 
     meta->action = ONVM_NF_ACTION_OUT;
-    meta->destination = 0;
+    meta->destination = 1;
     if (debug) RTE_LOG(INFO, APP, "egress to port: %d \n", meta->destination);
 }
 
@@ -320,7 +320,8 @@ acl_packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
         uint32_t src_ip = rte_be_to_cpu_32(ipv4_hdr->src_addr);
         uint32_t dst_ip = rte_be_to_cpu_32(ipv4_hdr->dst_addr);
         ret = onvm_acl_hit_rule(src_ip, dst_ip, 0, 0, &rule);
-        //ret = rte_lpm_lookup(lpm_tbl, rte_be_to_cpu_32(ipv4_hdr->src_addr), &rule);
+        ret = 1501;
+        rule = 0;
 
         if (debug) onvm_pkt_parse_char_ip(ip_string, rte_be_to_cpu_32(ipv4_hdr->src_addr));
 
@@ -467,8 +468,10 @@ packet_handler(struct rte_mbuf *pkt, struct onvm_pkt_meta *meta,
     case 2:
         return acl_packet_handler(pkt, meta, nf_local_ctx);
     case 3:
-        return chacha_packet_handler(pkt, meta, nf_local_ctx);
+        return acl_packet_handler(pkt, meta, nf_local_ctx);
     case 4:
+        return chacha_packet_handler(pkt, meta, nf_local_ctx);
+    case 5:
         return l4nat_packet_handler(pkt, meta, nf_local_ctx);
     default:
         return 0;
@@ -527,11 +530,15 @@ int main(int argc, char *argv[]) {
             printf("NF = ACL\n");
             break;
         case 3:
+            nf_function_table->pkt_handler = &acl_packet_handler;
+            printf("NF = BPF\n");
+            break;
+        case 4:
             chacha_module_init();
             nf_function_table->pkt_handler = &chacha_packet_handler;
             printf("NF = CHACHA\n");
             break;
-        case 4:
+        case 5:
             onvm_nat_dir_init();
             assert(nat_table != NULL);
             nf_function_table->pkt_handler = &l4nat_packet_handler;
@@ -547,6 +554,8 @@ int main(int argc, char *argv[]) {
                 lpm_setup(rules, acl_num_rules);
         } else if (nf_idx == 2) {
                 rules = setup_rules(&acl_num_rules);
+        } else if (nf_idx == 3) {
+                rules = bpf_setup_rules(&acl_num_rules);
         }
 
         /* Map the sdn_ft table */

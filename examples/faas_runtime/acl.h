@@ -49,6 +49,8 @@ int onvm_acl_hit_rule(uint32_t sip, uint32_t dip, uint16_t sport, uint16_t dport
 
 struct onvm_fw_rule **setup_rules(int *total_rules);
 
+struct onvm_fw_rule **bpf_setup_rules(int *total_rules);
+
 struct onvm_fw_rule **setup_rules_from_file(int *total_rules, char *rules_file);
 
 int lpm_setup(struct onvm_fw_rule **rules, int num_rules);
